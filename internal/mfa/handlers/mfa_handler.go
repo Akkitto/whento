@@ -19,6 +19,7 @@ import (
 	"github.com/whento/pkg/middleware"
 	"github.com/whento/pkg/validator"
 	authService "github.com/whento/whento/internal/auth/service"
+	"github.com/whento/whento/internal/auth/sessioncookie"
 	"github.com/whento/whento/internal/mfa/models"
 	"github.com/whento/whento/internal/mfa/service"
 )
@@ -397,17 +398,9 @@ func (h *MFAHandler) VerifyLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Set refresh token as httpOnly cookie
+	// Set refresh token as httpOnly cookie, expiring with the token itself.
 	if authResponse.RefreshToken != "" {
-		http.SetCookie(w, &http.Cookie{
-			Name:     "refresh_token",
-			Value:    authResponse.RefreshToken,
-			Path:     "/",
-			HttpOnly: true,
-			Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
-			SameSite: http.SameSiteStrictMode,
-			MaxAge:   7 * 24 * 60 * 60, // 7 days
-		})
+		sessioncookie.SetRefreshToken(w, r, authResponse.RefreshToken, authResponse.RefreshExpiresAt)
 		authResponse.RefreshToken = ""
 	}
 

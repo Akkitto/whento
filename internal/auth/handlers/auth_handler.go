@@ -26,6 +26,7 @@ import (
 	"github.com/whento/pkg/validator"
 	"github.com/whento/whento/internal/auth/models"
 	"github.com/whento/whento/internal/auth/service"
+	"github.com/whento/whento/internal/auth/sessioncookie"
 	"github.com/whento/whento/internal/config"
 )
 
@@ -78,31 +79,9 @@ type PasskeyRepository interface {
 	CountByUserID(ctx context.Context, userID uuid.UUID) (int, error)
 }
 
-// setRefreshTokenCookie sets the refresh token as an httpOnly secure cookie.
-func setRefreshTokenCookie(w http.ResponseWriter, r *http.Request, token string) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     "refresh_token",
-		Value:    token,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
-		SameSite: http.SameSiteStrictMode,
-		MaxAge:   7 * 24 * 60 * 60, // 7 days
-	})
-}
-
-// clearRefreshTokenCookie removes the refresh token cookie.
-func clearRefreshTokenCookie(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     "refresh_token",
-		Value:    "",
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
-		SameSite: http.SameSiteStrictMode,
-		MaxAge:   -1,
-	})
-}
+// The refresh cookie itself lives in the sessioncookie package, which owns the
+// one correct semantic (token-derived expiry, httpOnly, SameSite Strict) and is
+// shared by every login flow so none of them can drift.
 
 // NewAuthHandler creates a new auth handler
 func NewAuthHandler(
@@ -218,7 +197,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	// without the cookie a freshly registered account had nothing to restore its
 	// session from once the access token stopped being persisted.
 	if resp.RefreshToken != "" {
-		setRefreshTokenCookie(w, r, resp.RefreshToken)
+		sessioncookie.SetRefreshToken(w, r, resp.RefreshToken, resp.RefreshExpiresAt)
 		resp.RefreshToken = ""
 	}
 
@@ -278,7 +257,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 
 	// Set refresh token as httpOnly cookie
 	if resp.RefreshToken != "" {
-		setRefreshTokenCookie(w, r, resp.RefreshToken)
+		sessioncookie.SetRefreshToken(w, r, resp.RefreshToken, resp.RefreshExpiresAt)
 		resp.RefreshToken = ""
 	}
 
@@ -313,7 +292,7 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 
 	// Rotate refresh token cookie
 	if resp.RefreshToken != "" {
-		setRefreshTokenCookie(w, r, resp.RefreshToken)
+		sessioncookie.SetRefreshToken(w, r, resp.RefreshToken, resp.RefreshExpiresAt)
 		resp.RefreshToken = ""
 	}
 
@@ -338,7 +317,7 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 		_ = h.authService.Logout(r.Context(), cookie.Value)
 	}
 
-	clearRefreshTokenCookie(w, r)
+	sessioncookie.ClearRefreshToken(w, r)
 
 	httputil.JSON(w, http.StatusOK, map[string]string{"message": "Logged out successfully"})
 }

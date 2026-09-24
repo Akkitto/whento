@@ -484,9 +484,10 @@ func (s *AuthService) generateAuthResponse(ctx context.Context, user *models.Use
 		// sit in this field agreed with the token's real lifetime only at the default
 		// setting: an instance configuring JWT_ACCESS_EXPIRY got a number that did not
 		// describe the token it came with. The client schedules its refresh off this.
-		ExpiresIn:    int64(s.jwtManager.AccessExpiry().Seconds()),
-		RefreshToken: refreshToken,
-		User:         user,
+		ExpiresIn:        int64(s.jwtManager.AccessExpiry().Seconds()),
+		RefreshToken:     refreshToken,
+		RefreshExpiresAt: expiresAt,
+		User:             user,
 	}, nil
 }
 

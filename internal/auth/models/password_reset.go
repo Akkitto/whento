@@ -4,6 +4,8 @@
 
 package models
 
+import "time"
+
 // ForgotPasswordRequest represents a password reset request
 type ForgotPasswordRequest struct {
 	Email string `json:"email" validate:"required,email,max=255"`
@@ -27,9 +29,13 @@ type ForgotPasswordResponse struct {
 // `json:"-"` here is what keeps a seven-day credential out of reach of page scripts,
 // matching AuthResponse. Serialising it made reset-password the one endpoint that
 // handed its refresh token to anything that could read a response body.
+//
+// RefreshExpiresAt carries the token's real lifetime to the cookie writer; it is
+// also `json:"-"`, for the same reason.
 type ResetPasswordResponse struct {
-	Message      string        `json:"message"`
-	AccessToken  string        `json:"access_token"`
-	RefreshToken string        `json:"-"`
-	User         *UserResponse `json:"user"`
+	Message          string        `json:"message"`
+	AccessToken      string        `json:"access_token"`
+	RefreshToken     string        `json:"-"`
+	RefreshExpiresAt time.Time     `json:"-"`
+	User             *UserResponse `json:"user"`
 }

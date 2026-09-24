@@ -23,12 +23,14 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/pquerna/otp/totp"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/whento/pkg/jwt"
 	"github.com/whento/pkg/middleware"
 	authModels "github.com/whento/whento/internal/auth/models"
 	authService "github.com/whento/whento/internal/auth/service"
+	securecookie "github.com/whento/whento/internal/auth/sessioncookie"
 	"github.com/whento/whento/internal/config"
 	"github.com/whento/whento/internal/mfa/models"
 	mfaRepo "github.com/whento/whento/internal/mfa/repository"
@@ -758,6 +760,62 @@ func TestTheLimitIsSkippedWithoutACache(t *testing.T) {
 		if rec.Code != http.StatusUnauthorized {
 			t.Fatalf("attempt %d returned %d, want 401 — the limit is not supposed to engage without a cache", attempt, rec.Code)
 		}
+	}
+}
+
+// TestVerifyLoginSetsTheRefreshCookie is the success half of the MFA login: the
+// handler must hand the new session over with the same httpOnly cookie every
+// other full-login path uses, expiring with the refresh token itself.
+func TestVerifyLoginSetsTheRefreshCookie(t *testing.T) {
+	user := testUser()
+	const secret = "JBSWY3DPEHPK3PXP"
+	h := newHarness(t,
+		&fakeMFAStore{record: &models.UserMFA{UserID: user.ID, Secret: secret, Enabled: true}},
+		&fakeUserLookup{user: user}, newCountingCache(true))
+
+	token := tempToken(t, h.manager, map[string]interface{}{
+		"user_id": user.ID.String(), "mfa_pending": true,
+		"exp": time.Now().Add(5 * time.Minute).Unix(),
+	})
+	code, err := totp.GenerateCode(secret, time.Now())
+	if err != nil {
+		t.Fatalf("generate totp code: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/mfa/verify",
+		strings.NewReader(`{"temp_token":"`+token+`","code":"`+code+`"}`))
+	req.Header.Set("X-Forwarded-Proto", "https")
+
+	h.handler.VerifyLogin(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%q)", rec.Code, rec.Body.String())
+	}
+
+	var cookie *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == securecookie.Name {
+			cookie = c
+		}
+	}
+	if cookie == nil {
+		t.Fatal("no refresh_token cookie was set after a successful MFA login")
+	}
+	if cookie.Value == "" {
+		t.Fatal("the refresh_token cookie is empty")
+	}
+	if !cookie.HttpOnly || cookie.SameSite != http.SameSiteStrictMode || cookie.Path != "/" {
+		t.Errorf("cookie properties: HttpOnly=%v SameSite=%v Path=%q", cookie.HttpOnly, cookie.SameSite, cookie.Path)
+	}
+	if !cookie.Secure {
+		t.Error("cookie is not Secure on an https request")
+	}
+	if !cookie.Expires.After(time.Now()) {
+		t.Errorf("Expires = %v, want a future expiry matching the token", cookie.Expires)
+	}
+	if strings.Contains(rec.Body.String(), cookie.Value) {
+		t.Errorf("the refresh token leaked into the response body:\n%s", rec.Body.String())
 	}
 }
 

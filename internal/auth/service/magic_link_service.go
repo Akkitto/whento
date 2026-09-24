@@ -155,10 +155,11 @@ func (s *MagicLinkService) VerifyMagicLink(ctx context.Context, token string) (*
 
 	// Build auth response
 	return &models.AuthResponse{
-		AccessToken:  accessToken,
-		RefreshToken: refreshToken,
-		ExpiresIn:    int64(s.cfg.JWTAccessExpiry.Seconds()),
-		User:         user,
+		AccessToken:      accessToken,
+		RefreshToken:     refreshToken,
+		RefreshExpiresAt: refreshExpiresAt,
+		ExpiresIn:        int64(s.cfg.JWTAccessExpiry.Seconds()),
+		User:             user,
 	}, nil
 }
 

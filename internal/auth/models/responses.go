@@ -4,14 +4,22 @@
 
 package models
 
+import "time"
+
 // AuthResponse represents an authentication response
 type AuthResponse struct {
 	AccessToken  string `json:"access_token,omitempty"`
 	RefreshToken string `json:"-"`
-	ExpiresIn    int64  `json:"expires_in,omitempty"`
-	User         *User  `json:"user"`
-	RequireMFA   bool   `json:"require_mfa,omitempty"` // True if 2FA verification is required
-	TempToken    string `json:"temp_token,omitempty"`  // Temporary token for 2FA flow (5min expiry)
+	// RefreshExpiresAt is when the refresh token stops being valid. It comes from
+	// the token generator itself, so the cookie carrying the token can be given
+	// the exact same lifetime instead of a second copy of a configured duration.
+	// Like RefreshToken, it is deliberately `json:"-"`: the client must never see
+	// it, and the browser honestly does not need to — the cookie is complete.
+	RefreshExpiresAt time.Time `json:"-"`
+	ExpiresIn        int64     `json:"expires_in,omitempty"`
+	User             *User     `json:"user"`
+	RequireMFA       bool      `json:"require_mfa,omitempty"` // True if 2FA verification is required
+	TempToken        string    `json:"temp_token,omitempty"`  // Temporary token for 2FA flow (5min expiry)
 }
 
 // UserResponse represents a user response (public data)
