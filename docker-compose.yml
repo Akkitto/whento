@@ -90,6 +90,9 @@ services:
         limits:
           cpus: "1.0"
           memory: 512M
+          # pids echoed from pids_limit above: Compose 2.20+ refuses a distinct value
+          # in both places. This is the deploy-resources spelling of the same cap.
+          pids: 256
     # A read-only root filesystem is *not* enabled by default: it has not been
     # verified against a running container here. The application itself writes
     # nothing outside /app/keys (which is the named volume above), and the
@@ -145,6 +148,8 @@ services:
           # limit: it is a hard ceiling, and the server sizes nothing from it.
           # Raise this together with shared_buffers if the instance grows.
           memory: 1G
+          # pids echoed from pids_limit above; see the app service.
+          pids: 512
 
   redis:
     image: redis:7-alpine
@@ -198,6 +203,8 @@ services:
           # fragmentation. A limit equal to maxmemory gets the process
           # OOM-killed instead of evicting keys.
           memory: 512M
+          # pids echoed from pids_limit above; see the app service.
+          pids: 128
 
 volumes:
   postgres_data:
