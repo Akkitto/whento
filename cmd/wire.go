@@ -16,6 +16,9 @@ import (
 	"github.com/whento/pkg/jwt"
 	"github.com/whento/whento/internal/config"
 
+	// Holidays module
+	holidayHandlers "github.com/whento/whento/internal/holidays"
+
 	// Auth module
 	authHandlers "github.com/whento/whento/internal/auth/handlers"
 	authRepo "github.com/whento/whento/internal/auth/repository"
@@ -122,6 +125,9 @@ type handlers struct {
 
 	// SEO
 	seo *seo.Handler
+
+	// Holidays
+	holidays *holidayHandlers.Handler
 }
 
 // buildHandlers is the whole of the manual dependency injection: repositories,
@@ -284,6 +290,7 @@ func buildHandlers(d *deps) (*handlers, error) {
 		ics:         icsHandlers.NewICSHandler(icsSvc),
 		unifiedFeed: icsHandlers.NewUnifiedFeedConfigHandler(unifiedFeedConfigSvc),
 
-		seo: seo.NewHandler(d.cfg.AppURL, d.cfg.DisableRobots, buildType),
+		seo:      seo.NewHandler(d.cfg.AppURL, d.cfg.DisableRobots, buildType),
+		holidays: holidayHandlers.NewHandler(),
 	}, nil
 }
