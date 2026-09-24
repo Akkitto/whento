@@ -234,27 +234,48 @@ sync:
 	@echo "  Ctrl+Shift+P → 'Go: Restart Language Server'"
 
 # Migrations (using golang-migrate directly)
+#
+# Every migrate-* target assembles the $(BUILD_TYPE) migration set into a fresh
+# temporary directory and removes it on exit — concurrent invocations do not
+# collide on a shared scratch path, and a failed command still cleans up.
 migrate-build:
 	@echo "Building $(BUILD_TYPE) migrations..."
-	@bash scripts/build-migrations.sh $(BUILD_TYPE) ./migrations-build
+	@tmp=$$(mktemp -d /tmp/whento-migrations.XXXXXX); \
+	trap 'rm -rf "$$tmp"' EXIT INT TERM; \
+	bash scripts/build-migrations.sh $(BUILD_TYPE) "$$tmp"
 
-migrate-up: migrate-build
-	migrate -path ./migrations-build -database "$$DATABASE_URL" up
-	@rm -rf ./migrations-build
+migrate-up:
+	@set -eu; \
+	tmp=$$(mktemp -d /tmp/whento-migrations.XXXXXX); \
+	trap 'rm -rf "$$tmp"' EXIT INT TERM; \
+	echo "Applying $(BUILD_TYPE) migrations..."; \
+	bash scripts/build-migrations.sh $(BUILD_TYPE) "$$tmp"; \
+	migrate -path "$$tmp" -database "$$DATABASE_URL" up
 
-migrate-down: migrate-build
-	migrate -path ./migrations-build -database "$$DATABASE_URL" down 1
-	@rm -rf ./migrations-build
+migrate-down:
+	@set -eu; \
+	tmp=$$(mktemp -d /tmp/whento-migrations.XXXXXX); \
+	trap 'rm -rf "$$tmp"' EXIT INT TERM; \
+	echo "Rolling back the last $(BUILD_TYPE) migration..."; \
+	bash scripts/build-migrations.sh $(BUILD_TYPE) "$$tmp"; \
+	migrate -path "$$tmp" -database "$$DATABASE_URL" down 1
 
-migrate-reset: migrate-build
-	migrate -path ./migrations-build -database "$$DATABASE_URL" down force
-	migrate -path ./migrations-build -database "$$DATABASE_URL" up force
-	@rm -rf ./migrations-build
+migrate-reset:
+	@set -eu; \
+	tmp=$$(mktemp -d /tmp/whento-migrations.XXXXXX); \
+	trap 'rm -rf "$$tmp"' EXIT INT TERM; \
+	echo "=== DESTRUCTIVE: rolling back all $(BUILD_TYPE) migrations, then reapplying ==="; \
+	bash scripts/build-migrations.sh $(BUILD_TYPE) "$$tmp"; \
+	migrate -path "$$tmp" -database "$$DATABASE_URL" down -all || true; \
+	migrate -path "$$tmp" -database "$$DATABASE_URL" up
 
-migrate-status: migrate-build
-	@echo "Checking migration status..."
-	@migrate -path ./migrations-build -database "$$DATABASE_URL" version || echo "No migrations applied yet"
-	@rm -rf ./migrations-build
+migrate-status:
+	@set -eu; \
+	tmp=$$(mktemp -d /tmp/whento-migrations.XXXXXX); \
+	trap 'rm -rf "$$tmp"' EXIT INT TERM; \
+	echo "Checking $(BUILD_TYPE) migration status..."; \
+	bash scripts/build-migrations.sh $(BUILD_TYPE) "$$tmp"; \
+	migrate -path "$$tmp" -database "$$DATABASE_URL" version || echo "No migrations applied yet"
 
 # Docker Production
 #
