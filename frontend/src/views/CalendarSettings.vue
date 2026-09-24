@@ -615,6 +615,7 @@ import {
   getDefaultNotifyConfig,
   type NotifyConfig,
 } from '@/api/notify';
+import { authApi } from '@/api/auth';
 
 const router = useRouter();
 const route = useRoute();
@@ -677,7 +678,9 @@ const originalForm = reactive({
 
 // Notification config state
 const notifyConfig = ref<NotifyConfig>(getDefaultNotifyConfig());
-const smtpConfigured = ref(true); // TODO: Fetch from backend config
+// Email notification options depend on the instance actually having SMTP
+// configured; default to hidden until the backend confirms otherwise.
+const smtpConfigured = ref(false);
 
 // Track if form has unsaved changes
 const hasUnsavedChanges = computed(() => {
@@ -902,7 +905,13 @@ async function handleUpdate() {
 
 async function handleSaveNotifications(config: NotifyConfig) {
   try {
-    await updateNotifyConfig(calendarId, config);
+    // An instance without SMTP cannot ever deliver the email channel; persist
+    // that truthfully instead of saving an "enabled" flag that says it can.
+    const saved = { ...config };
+    if (!smtpConfigured.value) {
+      saved.channels = { ...saved.channels, email: { ...saved.channels.email, enabled: false } };
+    }
+    await updateNotifyConfig(calendarId, saved);
     toastStore.success(t('calendar.settingsSaved'));
   } catch (error: any) {
     toastStore.error(t(translateErrorMessage(error, { fallback: 'notifications.saveError' })));
@@ -1110,6 +1119,18 @@ onBeforeRouteLeave(async (_to, _from, next) => {
 
 onMounted(() => {
   loadCalendar();
+  // Email options follow the instance's actual SMTP configuration.
+  // /auth/magic-link/available is the existing endpoint for exactly this answer.
+  authApi
+    .checkMagicLinkAvailable()
+    .then(result => {
+      smtpConfigured.value = result.available;
+    })
+    .catch(() => {
+      // Best-effort: on failure the safe answer is "no SMTP", so email options
+      // stay hidden instead of being offered for mails that could never leave.
+      smtpConfigured.value = false;
+    });
   // Add beforeunload listener
   window.addEventListener('beforeunload', handleBeforeUnload);
 });

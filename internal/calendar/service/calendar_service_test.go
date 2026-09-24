@@ -751,6 +751,8 @@ func TestRegenerateToken(t *testing.T) {
 
 // TestBuildPublicCalendarResponseNotifyConfig covers the inline JSON parsing of
 // notify_config, which decides whether participants are told a threshold was met.
+// Participant notification now also requires the email channel to be enabled,
+// matching what the backend actually enforces on the participant-email endpoints.
 func TestBuildPublicCalendarResponseNotifyConfig(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -759,9 +761,11 @@ func TestBuildPublicCalendarResponseNotifyConfig(t *testing.T) {
 	}{
 		{name: "absent", config: nil},
 		{name: "empty", config: ptr("")},
-		{name: "enabled and notifying", config: ptr(`{"enabled":true,"notify_participants":true}`), want: true},
+		{name: "enabled and notifying with the email channel on", config: ptr(`{"enabled":true,"notify_participants":true,"channels":{"email":{"enabled":true}}}`), want: true},
+		{name: "enabled and notifying", config: ptr(`{"enabled":true,"notify_participants":true}`)},
 		{name: "enabled but not notifying", config: ptr(`{"enabled":true,"notify_participants":false}`)},
 		{name: "notifying but disabled", config: ptr(`{"enabled":false,"notify_participants":true}`)},
+		{name: "notifying but the email channel is off", config: ptr(`{"enabled":true,"notify_participants":true,"channels":{"email":{"enabled":false}}}`)},
 		{name: "malformed json is treated as off", config: ptr(`{not json`)},
 		{name: "unrelated keys", config: ptr(`{"something":"else"}`)},
 	}

@@ -75,9 +75,9 @@
           </button>
         </div>
 
-        <!-- Email Notification Section (if notifications enabled for participants) -->
+        <!-- Email Notification Section (if the calendar allows participant mail AND this instance can send email) -->
         <ParticipantEmailPanel
-          v-if="notificationsEnabled"
+          v-if="emailPanelVisible"
           :token="token"
           :participant-id="participantId"
           :email="participant.email"
@@ -231,6 +231,7 @@ import { useAuthStore } from '@/stores/auth';
 import { useCalendarHistoryStore } from '@/stores/calendarHistory';
 import { useToastStore } from '@/stores/toast';
 import { availabilitiesApi } from '@/api/availabilities';
+import { authApi } from '@/api/auth';
 import CalendarMonthView from '@/components/calendar/CalendarMonthView.vue';
 import ParticipantDetailsPopup from '@/components/ParticipantDetailsPopup.vue';
 import CalendarListView from '@/components/calendar/CalendarListView.vue';
@@ -308,6 +309,12 @@ const participant = computed(() => {
 });
 
 const notificationsEnabled = computed(() => calendar.value?.notify_participants === true);
+
+// Whether the instance has SMTP configured. The participant-email gate is the
+// calendar's policy *and* this capability: without mail the panel would offer a
+// form whose sends could never leave the server (and the backend now refuses).
+const smtpAvailable = ref(false);
+const emailPanelVisible = computed(() => notificationsEnabled.value && smtpAvailable.value);
 
 // How the calendar is drawn, and the persistence of that choice. Only the two settings
 // that move the visible date range refetch; the week's hours and slot size do not.
@@ -1127,5 +1134,15 @@ onMounted(async () => {
   // Calling loadCalendar() here as well fetched the calendar, its recurrences and the
   // whole range summary a second time on every mount.
   await handleCancelFromEmail();
+
+  // Email capability (read-only, so failures just hide the panel).
+  authApi
+    .checkMagicLinkAvailable()
+    .then(result => {
+      smtpAvailable.value = result.available;
+    })
+    .catch(() => {
+      smtpAvailable.value = false;
+    });
 });
 </script>

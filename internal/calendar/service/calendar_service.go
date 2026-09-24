@@ -302,17 +302,27 @@ func buildPublicCalendarResponse(calendar *models.Calendar, participants []model
 		return nil, fmt.Errorf("failed to parse allowed_hours: %w", err)
 	}
 
-	// Check if participant notifications are enabled
+	// Check if participant notifications are enabled. `notify_participants` in
+	// the public response is what the participant-email UI gates on, so it has to
+	// mean "the backend will actually send participant email" — which also
+	// requires the email channel. The SMTP capability of the instance is not
+	// decided here (that is the frontend's /auth/magic-link/available check), but
+	// the owner's declared channel preference is.
 	notifyParticipants := false
 	if calendar.NotifyConfig != nil && *calendar.NotifyConfig != "" {
-		// We need to import the notify models package to parse the config
-		// For now, use a simple JSON parsing approach
 		var notifyConfig struct {
 			Enabled            bool `json:"enabled"`
 			NotifyParticipants bool `json:"notify_participants"`
+			Channels           struct {
+				Email struct {
+					Enabled bool `json:"enabled"`
+				} `json:"email"`
+			} `json:"channels"`
 		}
 		if err := json.Unmarshal([]byte(*calendar.NotifyConfig), &notifyConfig); err == nil {
-			notifyParticipants = notifyConfig.Enabled && notifyConfig.NotifyParticipants
+			notifyParticipants = notifyConfig.Enabled &&
+				notifyConfig.NotifyParticipants &&
+				notifyConfig.Channels.Email.Enabled
 		}
 	}
 
