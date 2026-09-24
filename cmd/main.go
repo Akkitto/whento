@@ -71,6 +71,18 @@ import (
 	swaggerDocs "github.com/whento/whento/docs/swagger"
 )
 
+// instanceID returns a stable-enough identifier for this process, used as the
+// reminder-job owner mark. The hostname is unique among the few instances a
+// self-hosted deployment runs and is readable in the database when an operator
+// is tracing a stuck job.
+func instanceID() string {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		return fmt.Sprintf("pid-%d", os.Getpid())
+	}
+	return host
+}
+
 // main does nothing but set the exit status.
 //
 // os.Exit skips every deferred call, so a single one of them anywhere inside
@@ -281,6 +293,7 @@ func run() error {
 		broker:     broker,
 		limiter:    newRouteLimiter(rateLimiter, cfg.RateLimitEnabled),
 		quota:      services,
+		instanceID: instanceID(),
 		cacheProbe: cacheProbe,
 	}
 
@@ -308,6 +321,14 @@ func run() error {
 	// entire shutdown budget. Cancelling this is how they are told to leave.
 	baseCtx, baseCancel := context.WithCancel(context.Background())
 	defer baseCancel()
+
+	// Start the reminder scheduler. The reminders a calendar configures are only
+	// ever sent by this loop, so the process that serves the calendars is also
+	// the one that keeps their promises. It runs on baseCtx and therefore stops
+	// with the rest of the process — see the shutdown path below.
+	if h.reminders != nil {
+		go h.reminders.Run(baseCtx)
+	}
 
 	// Create server
 	srv := &http.Server{

@@ -302,6 +302,64 @@ func (r *CalendarRepository) GetByPublicToken(ctx context.Context, token string)
 	return calendar, nil
 }
 
+// ListWithNotifyConfig returns every calendar that carries a notify_config.
+//
+// It exists for the reminder scheduler: reminders live inside the notify_config
+// JSON, so there is no relational column to filter on, and the scheduler needs
+// to see a calendar to learn whether its reminders are switched on. The JSON
+// filtering happens in Go, in the scheduler.
+func (r *CalendarRepository) ListWithNotifyConfig(ctx context.Context) ([]*models.Calendar, error) {
+	query := `
+		SELECT id, owner_id, name, description, public_token, ics_token, threshold, allowed_weekdays, min_duration_hours, timezone, holidays_policy, allow_holiday_eves, allowed_hours, notify_on_threshold, notify_config, lock_participants, allow_anonymous_participants, start_date, end_date, created_at, updated_at
+		FROM calendars
+		WHERE notify_config IS NOT NULL
+		ORDER BY id`
+
+	rows, err := r.Pool.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list calendars with notify config: %w", err)
+	}
+	defer rows.Close()
+
+	var calendars []*models.Calendar
+	for rows.Next() {
+		calendar := &models.Calendar{}
+		err := rows.Scan(
+			&calendar.ID,
+			&calendar.OwnerID,
+			&calendar.Name,
+			&calendar.Description,
+			&calendar.PublicToken,
+			&calendar.ICSToken,
+			&calendar.Threshold,
+			&calendar.AllowedWeekdays,
+			&calendar.MinDurationHours,
+			&calendar.Timezone,
+			&calendar.HolidaysPolicy,
+			&calendar.AllowHolidayEves,
+			&calendar.AllowedHours,
+			&calendar.NotifyOnThreshold,
+			&calendar.NotifyConfig,
+			&calendar.LockParticipants,
+			&calendar.AllowAnonymousParticipants,
+			&calendar.StartDate,
+			&calendar.EndDate,
+			&calendar.CreatedAt,
+			&calendar.UpdatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan calendar: %w", err)
+		}
+		calendars = append(calendars, calendar)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating calendars: %w", err)
+	}
+
+	return calendars, nil
+}
+
 // Update updates a calendar
 func (r *CalendarRepository) Update(ctx context.Context, calendar *models.Calendar) error {
 	query := `

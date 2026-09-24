@@ -71,6 +71,11 @@ type deps struct {
 	limiter    *routeLimiter
 	quota      *Services
 
+	// instanceID identifies this process to the reminder-job queue: it is the
+	// value written into reminder_jobs.locked_by so a crash can be distinguished
+	// from a slow delivery and jobs reclaimed after the lock TTL.
+	instanceID string
+
 	// cacheProbe is nil when no Redis client was created — see run(), where the
 	// distinction between "no cache configured" and "cache down" is made.
 	cacheProbe authHandlers.Probe
@@ -102,6 +107,9 @@ type handlers struct {
 	// Notification
 	notifyConfig     *notifyHandlers.NotifyConfigHandler
 	participantEmail *notifyHandlers.ParticipantEmailHandler
+
+	// Reminders
+	reminders *notifyService.ReminderScheduler
 
 	// Availability
 	availability *availabilityHandlers.AvailabilityHandler
@@ -213,6 +221,26 @@ func buildHandlers(d *deps) (*handlers, error) {
 		d.log,
 	)
 
+	reminderJobRepo := notifyRepo.NewReminderJobRepository(d.pool)
+
+	// The reminder scheduler is a background job issuer/deliverer, not an
+	// endpoint: it reads the notify_config stored by the handler above and keeps
+	// the reminder promise. The persisted job queue is what makes it reliable;
+	// instanceID marks which process holds which jobs through ClaimDue.
+	reminderScheduler := notifyService.NewReminderScheduler(
+		calendarRepository,
+		availabilityRepository,
+		participantRepository,
+		userRepo,
+		notificationLogRepo,
+		d.mailer,
+		externalNotifier,
+		reminderJobRepo,
+		d.cfg.AppURL,
+		d.instanceID,
+		d.log,
+	)
+
 	// ========== AVAILABILITY SERVICE (depends on the notification service) ==========
 	availabilitySvc := availabilityService.NewAvailabilityService(
 		availabilityRepository,
@@ -247,6 +275,7 @@ func buildHandlers(d *deps) (*handlers, error) {
 			calendarRepository,
 			d.log,
 		),
+		reminders: reminderScheduler,
 
 		availability: availabilityHandlers.NewAvailabilityHandler(availabilitySvc),
 		recurrence:   availabilityHandlers.NewRecurrenceHandler(availabilitySvc),
