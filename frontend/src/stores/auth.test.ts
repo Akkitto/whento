@@ -13,6 +13,8 @@ import type { AuthResponse, User } from '@/types';
 
 const authApi = {
   register: vi.fn(),
+  bootstrap: vi.fn(),
+  bootstrapStatus: vi.fn(async () => ({ needs_bootstrap: false, registration_enabled: true })),
   login: vi.fn(),
   logout: vi.fn(),
   getMe: vi.fn(),
@@ -72,6 +74,10 @@ beforeEach(() => {
   // clearAllMocks clears calls, not implementations: without this a test that
   // opts into a session leaves every later test signed in.
   apiClient.hasSession.mockReturnValue(false);
+  authApi.bootstrapStatus.mockResolvedValue({
+    needs_bootstrap: false,
+    registration_enabled: true,
+  });
 });
 
 describe('auth store', () => {
@@ -178,6 +184,30 @@ describe('auth store', () => {
       expect(apiClient.setToken).toHaveBeenCalledWith('tok', undefined);
     });
 
+    it('clears bootstrapRequired after a successful first registration', async () => {
+      authApi.bootstrapStatus.mockResolvedValue({
+        needs_bootstrap: true,
+        registration_enabled: true,
+      });
+      authApi.bootstrap.mockResolvedValue(authResponse());
+      const store = freshStore();
+      await store.initializeAuth();
+
+      // A fresh instance: the guard is currently funnelling anonymous visitors
+      // to /bootstrap.
+      expect(store.bootstrapRequired).toBe(true);
+
+      // The first account is then created through open registration instead. The
+      // instance now has a user, so the client must stop treating bootstrap as
+      // needed — otherwise the guard keeps bouncing the new visitor to a page
+      // whose POST would 409. The server is the authority and never reads this
+      // flag, so this can only correct the UI, never close a door.
+      await store.register({ email: 'ada@example.com', password: 'pw', display_name: 'Ada' });
+
+      expect(store.bootstrapRequired).toBe(false);
+      expect(store.bootstrapStatusKnown).toBe(true);
+    });
+
     it('reports failure through i18n', async () => {
       authApi.register.mockRejectedValue({ code: 'BAD_REQUEST', message: 'Registration failed' });
       const store = freshStore();
@@ -187,6 +217,87 @@ describe('auth store', () => {
       ).rejects.toBeDefined();
 
       expect(store.error).toBe(i18n.global.t('errors.badRequest'));
+    });
+  });
+
+  describe('bootstrap', () => {
+    it('creates the first user and starts a session', async () => {
+      authApi.bootstrap.mockResolvedValue(authResponse({ access_token: 'boot-token' }));
+      authApi.bootstrapStatus.mockResolvedValue({
+        needs_bootstrap: true,
+        registration_enabled: false,
+      });
+      const store = freshStore();
+      await store.initializeAuth();
+
+      expect(store.bootstrapRequired).toBe(true);
+
+      await store.bootstrap({
+        boot_key: 'operator-key-123',
+        email: 'ada@example.com',
+        password: 'pw',
+        display_name: 'Ada',
+      });
+
+      expect(store.bootstrapRequired).toBe(false);
+    });
+
+    it('reports failure through i18n', async () => {
+      authApi.bootstrap.mockRejectedValue({
+        code: 'UNAUTHORIZED',
+        message: 'Invalid bootstrap key',
+      });
+      const store = freshStore();
+
+      await expect(
+        store.bootstrap({
+          boot_key: 'wrong-key-1234567890',
+          email: 'a@b.c',
+          password: 'pw',
+          display_name: 'A',
+        })
+      ).rejects.toBeDefined();
+
+      expect(store.error).toBe(i18n.global.t('errors.unauthorized'));
+    });
+  });
+
+  describe('registration capability flags', () => {
+    it('defaults to registration open, no bootstrap needed', () => {
+      const store = freshStore();
+      // Not authoritative: the flags are a fallback until /auth/status answers.
+      expect(store.registrationEnabled).toBe(true);
+      expect(store.bootstrapRequired).toBe(false);
+      expect(store.bootstrapStatusKnown).toBe(false);
+    });
+
+    it('loads both flags from the public status endpoint during init', async () => {
+      authApi.bootstrapStatus.mockResolvedValue({
+        needs_bootstrap: true,
+        registration_enabled: false,
+      });
+      const store = freshStore();
+
+      await store.initializeAuth();
+
+      expect(store.bootstrapRequired).toBe(true);
+      expect(store.registrationEnabled).toBe(false);
+      // Now authoritative: the guard may redirect on these.
+      expect(store.bootstrapStatusKnown).toBe(true);
+    });
+
+    it('marks the capability state unknown when the status call fails', async () => {
+      authApi.bootstrapStatus.mockRejectedValue(new Error('offline'));
+      const store = freshStore();
+
+      await store.initializeAuth();
+
+      // The defaults stay, but they are explicitly *not* authoritative: the
+      // guard must not close /bootstrap on a stale "configured" guess when the
+      // only authoritative answer was "unreachable".
+      expect(store.registrationEnabled).toBe(true);
+      expect(store.bootstrapRequired).toBe(false);
+      expect(store.bootstrapStatusKnown).toBe(false);
     });
   });
 

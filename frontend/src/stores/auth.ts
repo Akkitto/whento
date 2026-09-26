@@ -9,13 +9,45 @@ import { ref, computed } from 'vue';
 import { authApi } from '@/api/auth';
 import { apiClient } from '@/api/client';
 import { useAsyncActions } from '@/stores/asyncAction';
-import type { User, LoginRequest, RegisterRequest } from '@/types';
+import type {
+  User,
+  LoginRequest,
+  RegisterRequest,
+  BootstrapRequest,
+  BootstrapStatus,
+} from '@/types';
 
 export const useAuthStore = defineStore('auth', () => {
   // State
   const user = ref<User | null>(null);
   const initialized = ref(false);
   const { loading, error, run, clearError } = useAsyncActions();
+
+  /**
+   * Whether the instance will accept new registrations. Comes from the server's
+   * ALLOWED_REGISTER setting; when false the UI must offer no register button,
+   * and /register may as well not exist.
+   *
+   * Defaults to `true` (registration shown): a wrong guess here cannot admit
+   * anyone, because the server still rejects the attempt with a 403. The
+   * dangerous default is the reverse — hiding a working door the server would
+   * have opened.
+   */
+  const registrationEnabled = ref(true);
+  /**
+   * Whether the instance has no users yet and so still needs its first account
+   * created (through /bootstrap or through the first registration).
+   */
+  const bootstrapRequired = ref(false);
+  /**
+   * Whether the capability flags above reflect a real /auth/status answer rather
+   * than the startup defaults. A failed (or not-yet-completed) status read must
+   * not be acted on as if it were "registration open, nothing to bootstrap":
+   * that exact combination is backwards on a fresh closed instance, and would
+   * hide the only setup route. The guard therefore only closes /bootstrap and
+   * /register when this is true.
+   */
+  const bootstrapStatusKnown = ref(false);
 
   /**
    * The one in-flight (or settled) `initializeAuth` run.
@@ -41,6 +73,31 @@ export const useAuthStore = defineStore('auth', () => {
   async function register(data: RegisterRequest) {
     return run('auth.registerError', async () => {
       const response = await authApi.register(data);
+      user.value = response.user;
+      if (response.access_token) {
+        apiClient.setToken(response.access_token, response.expires_in);
+      }
+      // A successful (first) registration means the instance now has a user, so
+      // it can no longer need bootstrapping. Clearing the flag here keeps the
+      // guard from funnelling the just-registered visitor to /bootstrap — the
+      // server never reads this flag, so this is purely a local-UI correction
+      // and can never close a door server-side.
+      bootstrapRequired.value = false;
+      bootstrapStatusKnown.value = true;
+      return response;
+    });
+  }
+
+  /**
+   * Create the first (administrator) account of an unconfigured instance.
+   *
+   * `bootstrapRequired` is cleared on success because the server has a user now;
+   * the router guard then stops funnelling anonymous visitors to /bootstrap.
+   */
+  async function bootstrap(data: BootstrapRequest) {
+    return run('auth.registerError', async () => {
+      const response = await authApi.bootstrap(data);
+      bootstrapRequired.value = false;
       user.value = response.user;
       if (response.access_token) {
         apiClient.setToken(response.access_token, response.expires_in);
@@ -160,6 +217,28 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   /**
+   * Refresh the public auth capability state (bootstrap/mount needs, registration
+   * open or not). Idempotent enough to call on every initializeAuth: it is one
+   * cheap public read, and the router guard makes its redirect decisions on the
+   * result.
+   *
+   * On failure the capability flags are *not* overwritten with the startup
+   * defaults-as-if-authoritative: `bootstrapStatusKnown` goes false instead, so
+   * the guard knows it has no answer and must not close the only setup route on
+   * a guess. The server remains the authority for either direction.
+   */
+  async function loadAuthStatus() {
+    try {
+      const status: BootstrapStatus = await authApi.bootstrapStatus();
+      registrationEnabled.value = status.registration_enabled;
+      bootstrapRequired.value = status.needs_bootstrap;
+      bootstrapStatusKnown.value = true;
+    } catch {
+      bootstrapStatusKnown.value = false;
+    }
+  }
+
+  /**
    * Restore the session from the httpOnly refresh cookie.
    *
    * A cold load starts with no access token — it only ever lives in memory — so
@@ -175,6 +254,10 @@ export const useAuthStore = defineStore('auth', () => {
    */
   function initializeAuth(): Promise<void> {
     initPromise ??= (async () => {
+      // Capability state first: the guard answers "may this visitor register / must
+      // they bootstrap?" from it, before it worries about a session at all.
+      await loadAuthStatus();
+
       if (apiClient.hasSession()) {
         try {
           await fetchUser();
@@ -208,6 +291,9 @@ export const useAuthStore = defineStore('auth', () => {
     error,
     initialized,
     tempToken,
+    registrationEnabled,
+    bootstrapRequired,
+    bootstrapStatusKnown,
 
     // Getters
     isAuthenticated,
@@ -215,6 +301,7 @@ export const useAuthStore = defineStore('auth', () => {
 
     // Actions
     register,
+    bootstrap,
     login,
     logout,
     fetchUser,
