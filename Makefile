@@ -1,4 +1,4 @@
-.PHONY: require-selfhosted-image dev dev-fullstack dev-backend dev-frontend dev-db dev-app test test-root test-pkg test-coverage build clean migrate-up migrate-down migrate-reset migrate-status sync docker-build docker-build-versioned docker-build-multiarch docker-test-build docker-up docker-down docker-logs docker-ps swagger swagger-generate swagger-generate-if-missing swagger-clean types types-check docs-serve docs-validate keys help hooks format format-go format-frontend format-check format-check-go format-check-frontend lint lint-go
+.PHONY: require-selfhosted-image dev dev-fullstack dev-backend dev-frontend dev-db dev-app test test-root test-pkg test-coverage build clean migrate-up migrate-down migrate-reset migrate-status sync docker-build docker-build-versioned docker-build-multiarch docker-test-build docker-up docker-down docker-logs docker-ps swagger swagger-generate swagger-generate-if-missing swagger-contract-check swagger-clean types types-check docs-serve docs-validate keys help hooks format format-go format-frontend format-check format-check-go format-check-frontend lint lint-go
 
 # BUILD_TYPE can be 'cloud' or 'selfhosted' (default: selfhosted)
 BUILD_TYPE ?= selfhosted
@@ -423,7 +423,26 @@ swagger-clean:
 	@rm -rf docs/swagger
 	@echo "✓ Swagger files cleaned"
 
-swagger: swagger-generate
+# Contract assertion for the 72-character password ceiling.
+#
+# The runtime validator enforces 72 *bytes* via the custom `maxbytes` rule; swag
+# does not understand that tag, so the Swagger `maxLength: 72` comes only from
+# the paired `max=72` annotation on the same field. A re-annotator that drops
+# the `max` tag would silently remove the documented ceiling, and the generated
+# TypeScript cannot catch it (lengths are not encoded in the types). This gate
+# regenerates swagger and fails if any of the four password fields lost its
+# maxLength, which is exactly the drift the fourth audit found.
+#
+# The check is a tiny Go program (cmd/swagger-contract-check, which owns the
+# model:property table) rather than a yq one-liner: CI's generate-swagger job
+# installs Go but not yq, so a yq-based gate would silently never run there. Any
+# tool a prerequisite needs is declared and installed by the job that uses it.
+swagger-contract-check: swagger-generate
+	@echo "Checking password maxLength survives swagger regeneration..."
+	@go run ./cmd/swagger-contract-check .
+	@echo "✓ All four password fields keep maxLength: 72"
+
+swagger: swagger-generate swagger-contract-check
 
 # Frontend API types
 #
@@ -454,5 +473,5 @@ docs-serve:
 	@echo ""
 	@echo "Or generate static docs with 'make swagger-generate'"
 
-docs-validate: swagger-generate
+docs-validate: swagger-contract-check
 	@echo "✓ Swagger documentation generated successfully (validation passed)"
