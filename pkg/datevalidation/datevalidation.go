@@ -120,11 +120,6 @@ func GetCountryFromTimezone(timezone string) string {
 	return ""
 }
 
-// getCountryFromTimezone is a private alias for backward compatibility
-func getCountryFromTimezone(timezone string) string {
-	return GetCountryFromTimezone(timezone)
-}
-
 // IsHoliday checks if a given date is a public holiday in the specified country.
 //
 // This is a bool convenience kept for callers who only need "yes or no" (the
@@ -136,19 +131,9 @@ func IsHoliday(date time.Time, countryCode string) bool {
 	return isHolidayDate
 }
 
-// isHoliday is a private alias for backward compatibility
-func isHoliday(date time.Time, countryCode string) bool {
-	return IsHoliday(date, countryCode)
-}
-
 // IsHolidayEve checks if a given date is the day before a public holiday
 func IsHolidayEve(date time.Time, countryCode string) bool {
 	// Check if the next day is a holiday
 	nextDay := date.AddDate(0, 0, 1)
 	return IsHoliday(nextDay, countryCode)
-}
-
-// isHolidayEve is a private alias for backward compatibility
-func isHolidayEve(date time.Time, countryCode string) bool {
-	return IsHolidayEve(date, countryCode)
 }
