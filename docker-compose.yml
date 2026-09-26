@@ -3,9 +3,9 @@
 # Hardening applied here, and the reasoning behind it, is documented in
 # docs/hardening-docker.md. Two things are worth reading before the first
 # `docker compose up`:
-#   - docs/backup-restore.md  — `docker compose down -v` DELETES postgres_data,
+#   - docs/backup-restore.md  - `docker compose down -v` DELETES postgres_data,
 #     redis_data and whento_keys. There is no undo.
-#   - docs/upgrade-postgres-redis.md — a Postgres major upgrade cannot read the
+#   - docs/upgrade-postgres-redis.md - a Postgres major upgrade cannot read the
 #     existing data volume; it needs a dump and a restore.
 
 services:
@@ -71,7 +71,7 @@ services:
       # this volume they live in the container's writable layer, so every `docker
       # compose up` that recreates the container (image update, changed env var)
       # mints a new key pair and invalidates every issued token: all users are
-      # logged out. Participant links are unaffected — they authorise by the link
+      # logged out. Participant links are unaffected - they authorise by the link
       # itself, not by a signed token.
       - whento_keys:/app/keys
     depends_on:
@@ -97,7 +97,7 @@ services:
       - ALL
     pids_limit: 256
     # Compose v2 applies these on a plain `docker compose up`; they are not
-    # swarm-only. Sized for a small self-hosted instance — raise them rather
+    # swarm-only. Sized for a small self-hosted instance - raise them rather
     # than remove them if the container gets OOM-killed under real load.
     deploy:
       resources:
@@ -232,4 +232,3 @@ volumes:
 networks:
   whento-network:
     driver: bridge
-
