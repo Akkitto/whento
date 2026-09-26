@@ -192,10 +192,7 @@ func (s *ReminderScheduler) runOnce(ctx context.Context) {
 
 	// Deliver in batches until the queue is drained or the interval elapses.
 	deadline := s.now().Add(s.interval)
-	for {
-		if !s.now().Before(deadline) {
-			break
-		}
+	for s.now().Before(deadline) {
 		// worked means the claim pass took possession of at least one job — a
 		// job that was then canceled during its own verification still counts,
 		// so a batch full of stale jobs does not make the loop stop early.
