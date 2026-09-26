@@ -87,8 +87,8 @@ func TestReminderJobClaimIsAtomicAndScopedToDue(t *testing.T) {
 	if len(claimed) != 1 {
 		t.Fatalf("claimed %d jobs, want 1 (only the due one)", len(claimed))
 	}
-	if claimed[0].ID != due.ID {
-		t.Errorf("claimed the wrong job: %v", claimed[0].ID)
+	if !sameDeliveryKey(claimed[0], *due) {
+		t.Errorf("claimed the wrong job: %+v", claimed[0])
 	}
 	if claimed[0].LockedBy != "instance-a" {
 		t.Errorf("LockedBy = %q, want instance-a", claimed[0].LockedBy)
@@ -108,9 +108,20 @@ func TestReminderJobClaimIsAtomicAndScopedToDue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reclaim after lock expiry: %v", err)
 	}
-	if len(reclaimed) != 1 || reclaimed[0].ID != due.ID {
+	if len(reclaimed) != 1 || !sameDeliveryKey(reclaimed[0], *due) {
 		t.Errorf("the expired-lock job was not reclaimed: %+v", reclaimed)
 	}
+}
+
+// sameDeliveryKey reports whether two jobs describe the same delivery: the four
+// columns that form reminder_jobs' unique constraint. The ID itself is generated
+// by the database on insert, so a test cannot own it ahead of time — comparing
+// the delivery key is the identity the enqueueing test actually controls.
+func sameDeliveryKey(a, b models.ReminderJob) bool {
+	return a.CalendarID == b.CalendarID &&
+		a.EventDate.Equal(b.EventDate) &&
+		a.RecipientType == b.RecipientType &&
+		a.Channel == b.Channel
 }
 
 func TestReminderJobLifecycle(t *testing.T) {
