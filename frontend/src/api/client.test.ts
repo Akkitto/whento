@@ -377,6 +377,44 @@ describe('apiClient', () => {
       expect(seen.filter(r => r.url === '/auth/refresh')).toHaveLength(0);
     });
 
+    // A 401 from /auth/bootstrap is a *wrong boot key*, not an expired session: the
+    // bootstrap page must be left alone to render the error, not sign the visitor
+    // out and bounce them to a login screen. The same reasoning applies to a wrong
+    // password on login and a duplicate on register — reject, keep the session.
+    it('does not sign out or bounce on a rejected /auth/bootstrap key', async () => {
+      const posted: unknown[] = [];
+      vi.spyOn(BroadcastChannel.prototype, 'postMessage').mockImplementation(m => posted.push(m));
+      apiClient.setToken('still-valid');
+      posted.length = 0;
+
+      withAdapter(config => {
+        if (config.url === '/auth/bootstrap') return unauthorized();
+        return ok({});
+      });
+
+      await expect(apiClient.post('/auth/bootstrap', { key: 'wrong' })).rejects.toBeTruthy();
+
+      expect(apiClient.hasSession()).toBe(true);
+      expect(window.location.href).toBe('');
+      expect(posted).toEqual([]);
+    });
+
+    it('does not sign out or bounce on a rejected login or register', async () => {
+      const posted: unknown[] = [];
+      vi.spyOn(BroadcastChannel.prototype, 'postMessage').mockImplementation(m => posted.push(m));
+      apiClient.setToken('still-valid');
+      posted.length = 0;
+
+      withAdapter(() => unauthorized());
+
+      await expect(apiClient.post('/auth/login', {})).rejects.toBeTruthy();
+      await expect(apiClient.post('/auth/register', {})).rejects.toBeTruthy();
+
+      expect(apiClient.hasSession()).toBe(true);
+      expect(window.location.href).toBe('');
+      expect(posted).toEqual([]);
+    });
+
     it('logs out when the refresh itself fails', async () => {
       apiClient.setToken('expired');
 

@@ -184,18 +184,26 @@ class ApiClient {
       async (error: AxiosError<ApiResponse<never>>) => {
         const originalRequest = error.config;
 
-        // Don't try to refresh token for auth endpoints (login, register, refresh)
-        const isAuthEndpoint =
+        // A 401 on the auth endpoints is a *rejection*, not an expired session:
+        // bad credentials on login, a duplicate on register, a wrong boot key on
+        // bootstrap. None of them should refresh (the token is not the problem)
+        // and, crucially, none of them should sign anyone out — a failed register
+        // attempt in one tab must not log a healthy other tab out. Only a failed
+        // `/auth/refresh` means the session itself is dead; that case is handled
+        // in its own branch below.
+        const isRejectedAuth =
           originalRequest?.url?.includes('/auth/login') ||
           originalRequest?.url?.includes('/auth/register') ||
-          originalRequest?.url?.includes('/auth/refresh');
+          originalRequest?.url?.includes('/auth/bootstrap');
+        const isRefresh = originalRequest?.url?.includes('/auth/refresh');
 
         // If 401 and not already retrying, try to refresh token (except for auth endpoints)
         if (
           error.response?.status === 401 &&
           originalRequest &&
           !(originalRequest as any)._retry &&
-          !isAuthEndpoint
+          !isRejectedAuth &&
+          !isRefresh
         ) {
           (originalRequest as any)._retry = true;
 
@@ -209,8 +217,8 @@ class ApiClient {
           }
         }
 
-        // If 401 on auth endpoint (e.g., refresh failed), force logout
-        if (error.response?.status === 401 && isAuthEndpoint) {
+        // If 401 on /auth/refresh (or spawned by one), force logout
+        if (error.response?.status === 401 && isRefresh) {
           this.forceLogout();
         }
 
