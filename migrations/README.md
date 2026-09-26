@@ -91,7 +91,7 @@ migrate create -ext sql -dir migrations/selfhosted -seq migration_name
 
 ## Migration Naming
 
-- **Common**: `001_init`, `008_notification_log`, `012_unified_ics_feed`, `014_availability_index_cleanup`, `015_refresh_token_grace_window`
+- **Common**: `001_init`, `008_notification_log`, `012_unified_ics_feed`, `014_availability_index_cleanup`, `015_refresh_token_grace_window`, `016_reminder_jobs`, `017_app_state`
 - **Cloud**: `005_ecommerce`, `011_order_shop_session`, `013_drop_billing`
 - **Self-hosted**: `005_licenses`, `013_drop_licensing`
 
@@ -99,8 +99,8 @@ migrate create -ext sql -dir migrations/selfhosted -seq migration_name
 > into a build, so a number may be reused between `cloud/` and `selfhosted/` — `005` and
 > `013` both are. It must stay unique against `common/`.
 
-The latest common migration is `015`, so **the next common migration is `016`**. (`013` is
-taken by the two per-variant drop migrations; `014` and `015` are common.)
+The latest common migration is `017`, so **the next common migration is `018`**. (`013` is
+taken by the two per-variant drop migrations; `014`–`017` are common.)
 
 ## Testing
 
