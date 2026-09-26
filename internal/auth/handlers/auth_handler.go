@@ -456,7 +456,7 @@ func (h *AuthHandler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 // UpdateUserRole updates a user's role (admin only)
 //
 //	@Summary		Update user role
-//	@Description	Updates a user's role (admin or user). Admin only. Cannot change own role.
+//	@Description	Updates a user's role (admin or user). Admin only. Cannot change own role. The last administrator cannot be demoted.
 //	@Tags			Admin
 //	@Accept			json
 //	@Produce		json
@@ -464,7 +464,7 @@ func (h *AuthHandler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 //	@Param			id		path		string					true	"User ID"
 //	@Param			request	body		models.UpdateRoleRequest	true	"New role"
 //	@Success		200		{object}	map[string]string
-//	@Failure		400		{object}	httputil.ErrorResponse	"Cannot change own role or invalid request"
+//	@Failure		400		{object}	httputil.ErrorResponse	"Cannot change own role, cannot demote the last administrator, or invalid request"
 //	@Failure		401		{object}	httputil.ErrorResponse	"Unauthorized"
 //	@Failure		403		{object}	httputil.ErrorResponse	"Forbidden (requires admin role)"
 //	@Failure		404		{object}	httputil.ErrorResponse	"User not found"
@@ -492,6 +492,10 @@ func (h *AuthHandler) UpdateUserRole(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, service.ErrCannotDemoteSelf) {
 			httputil.Error(w, http.StatusBadRequest, httputil.ErrCodeBadRequest, "Cannot change your own role")
+			return
+		}
+		if errors.Is(err, service.ErrLastAdmin) {
+			httputil.Error(w, http.StatusBadRequest, httputil.ErrCodeBadRequest, "Cannot demote the last administrator")
 			return
 		}
 		if errors.Is(err, service.ErrUserNotFound) {
@@ -527,6 +531,10 @@ func (h *AuthHandler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, service.ErrCannotDeleteSelf) {
 			httputil.Error(w, http.StatusBadRequest, httputil.ErrCodeBadRequest, "Cannot delete your own account")
+			return
+		}
+		if errors.Is(err, service.ErrLastAdmin) {
+			httputil.Error(w, http.StatusBadRequest, httputil.ErrCodeBadRequest, "Cannot delete the last administrator")
 			return
 		}
 		if errors.Is(err, service.ErrUserNotFound) {

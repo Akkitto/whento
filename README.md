@@ -248,6 +248,21 @@ EMAIL_VERIFICATION_ENABLED=true   # Default: false
 ALLOWED_REGISTER=true             # Default: true
 ALLOWED_EMAILS=*                  # Comma-separated patterns (e.g., *@company.com). Default: * (all)
 
+# First-user bootstrap. Leave unset to have the server generate a one-time boot
+# key and print it to the logs at startup; create the first (administrator)
+# account at /bootstrap with it. Pin it (16-256 chars) for deterministic
+# automation or for more than one instance behind a load balancer, so every
+# replica accepts the same key.
+# BOOTSTRAP_KEY=
+#
+# BOOTSTRAP_KEY_FILE reads the key from a file inside the container (Docker
+# secrets / K8s mounts). The compose file passes the variable through but cannot
+# create the file: with docker compose, set BOOTSTRAP_KEY_FILE in .env AND mount
+# the file into the container (bind mount or a real `secrets:` entry). Example:
+#   BOOTSTRAP_KEY_FILE=/run/secrets/bootstrap_key
+#   volumes: ["./secrets/bootstrap_key:/run/secrets/bootstrap_key:ro"]
+# BOOTSTRAP_KEY_FILE=
+
 # Rate Limiting
 RATE_LIMIT_ENABLED=true           # Default: true
 
@@ -575,6 +590,12 @@ The `pre-commit` hook formats staged files automatically — see [CONTRIBUTING.m
 
 - `POST /register` — Register new user (email verification required)
 - `POST /login` — Login with credentials
+- `POST /bootstrap` - Create the first (administrator) account of an unconfigured
+  instance, guarded by the one-time boot key (BOOTSTRAP_KEY or printed in the logs);
+  closes forever once a user exists
+- `GET /status` - Public capability read: whether the instance still needs its
+  first account and whether open registration is enabled (drives the frontend's
+  register button and /bootstrap route; polled by automation)
 - `POST /refresh` — Refresh access token
 - `POST /logout` — Logout (invalidate refresh token)
 - `GET /me` — Get current user profile

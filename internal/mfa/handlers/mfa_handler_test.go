@@ -241,11 +241,18 @@ func (s *stubAuthUserRepo) GetByEmail(context.Context, string) (*authModels.User
 
 	return s.user, nil
 }
+
+// FirstUserCreated reports whether the stub believes the instance has been
+// bootstrapped; the MFA flows that touch registration never exercise the
+// first-user path, but they must still satisfy the AuthService repository
+// interface.
+func (s *stubAuthUserRepo) FirstUserCreated(context.Context) (bool, error) {
+	return s.user != nil, nil
+}
 func (s *stubAuthUserRepo) Update(context.Context, *authModels.User) error { return nil }
 func (s *stubAuthUserRepo) Delete(context.Context, uuid.UUID) error        { return nil }
-func (s *stubAuthUserRepo) Count(context.Context) (int, error)             { return 1, nil }
-func (s *stubAuthUserRepo) DetermineRoleAtomically(context.Context) (string, error) {
-	return authModels.RoleUser, nil
+func (s *stubAuthUserRepo) CreateFirstUser(context.Context, *authModels.User) error {
+	return nil
 }
 func (s *stubAuthUserRepo) List(context.Context) ([]*authModels.User, error)        { return nil, nil }
 func (s *stubAuthUserRepo) UpdateRole(context.Context, uuid.UUID, string) error     { return nil }

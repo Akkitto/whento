@@ -39,7 +39,7 @@ func TestRefreshTokenRoundTrip(t *testing.T) {
 	tokens := repository.NewTokenRepository(pool)
 	ctx := dbtest.Context(t)
 
-	user := newUser(t, pool)
+	user := newUser(ctx, t, pool)
 	if err := users.Create(ctx, user); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestConsumeIsWonByExactlyOneCaller(t *testing.T) {
 	tokens := repository.NewTokenRepository(pool)
 	ctx := dbtest.Context(t)
 
-	user := newUser(t, pool)
+	user := newUser(ctx, t, pool)
 	if err := users.Create(ctx, user); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestDeleteConsumedBeforeSparesLiveTokens(t *testing.T) {
 	tokens := repository.NewTokenRepository(pool)
 	ctx := dbtest.Context(t)
 
-	user := newUser(t, pool)
+	user := newUser(ctx, t, pool)
 	if err := users.Create(ctx, user); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
@@ -186,12 +186,12 @@ func TestDeleteByUserIDEndsEverySession(t *testing.T) {
 	tokens := repository.NewTokenRepository(pool)
 	ctx := dbtest.Context(t)
 
-	user := newUser(t, pool)
+	user := newUser(ctx, t, pool)
 	if err := users.Create(ctx, user); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
 
-	other := newUser(t, pool)
+	other := newUser(ctx, t, pool)
 	if err := users.Create(ctx, other); err != nil {
 		t.Fatalf("create other user: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestRefreshTokensGoWithTheirUser(t *testing.T) {
 	tokens := repository.NewTokenRepository(pool)
 	ctx := dbtest.Context(t)
 
-	user := newUser(t, pool)
+	user := newUser(ctx, t, pool)
 	if err := users.Create(ctx, user); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestDeleteExpiredRemovesOnlyExpiredTokens(t *testing.T) {
 	tokens := repository.NewTokenRepository(pool)
 	ctx := dbtest.Context(t)
 
-	user := newUser(t, pool)
+	user := newUser(ctx, t, pool)
 	if err := users.Create(ctx, user); err != nil {
 		t.Fatalf("create user: %v", err)
 	}

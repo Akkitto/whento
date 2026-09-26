@@ -302,6 +302,15 @@ func run() error {
 		return err
 	}
 
+	// If the instance has no users yet, make the one-time boot key available
+	// (or materialise the operator-pinned BOOTSTRAP_KEY) and log it, so the
+	// first administrator can be created at /bootstrap. The service does the
+	// generation and the "still unconfigured?" check; the key lands in the
+	// logs next to every other line an operator sees when standing up a server.
+	if _, err := h.bootstrapService.EnsureKey(ctx); err != nil {
+		return fmt.Errorf("materialize bootstrap state: %w", err)
+	}
+
 	// ========== FRONTEND (SPA) ==========
 	// Serve embedded frontend for all non-API routes
 	spaHandler, err := web.NewSPAHandler(cfg.AppURL, buildType)

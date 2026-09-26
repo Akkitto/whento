@@ -52,6 +52,20 @@ services:
       - EMAIL_VERIFICATION_ENABLED=${EMAIL_VERIFICATION_ENABLED:-true}
       - ALLOWED_REGISTER=${ALLOWED_REGISTER:-true}
       - ALLOWED_EMAILS=${ALLOWED_EMAILS:-*}
+
+      # First-user bootstrap. Leave unset and the server generates a one-time
+      # boot key and prints it to the logs at startup (create the first admin at
+      # /bootstrap). Pin it here for deterministic automation (Ansible) or when
+      # running more than one replica behind the same load balancer, so every
+      # replica accepts the same key.
+      #
+      # The _FILE form reads the key from a file inside the container (Docker
+      # secrets / K8s mount). Setting it in the Compose `.env` is *not* enough:
+      # the file has to exist in the container too, so mount it, e.g. with a
+      # bind mount `- ./secrets/bootstrap_key:/run/secrets/bootstrap_key:ro`
+      # and `BOOTSTRAP_KEY_FILE=/run/secrets/bootstrap_key`.
+      - BOOTSTRAP_KEY=${BOOTSTRAP_KEY:-}
+      - BOOTSTRAP_KEY_FILE=${BOOTSTRAP_KEY_FILE:-}
     volumes:
       # The JWT signing keys are generated on first start by the entrypoint. Without
       # this volume they live in the container's writable layer, so every `docker
@@ -218,3 +232,4 @@ volumes:
 networks:
   whento-network:
     driver: bridge
+

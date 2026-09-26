@@ -12,9 +12,15 @@ type ForgotPasswordRequest struct {
 }
 
 // ResetPasswordRequest represents a password reset with token
+//
+// NewPassword carries both `max=72` (rune ceiling, read by the swagger
+// generator into maxLength) and `maxbytes=72` (the real 72-byte bcrypt ceiling,
+// in UTF-8 bytes). They are redundant at runtime — bytes >= runes, so maxbytes
+// is always the binding one — but `max=72` is what keeps the API contract
+// showing the upper bound through a clean swagger regeneration.
 type ResetPasswordRequest struct {
 	Token       string `json:"token" validate:"required,len=64"`
-	NewPassword string `json:"new_password" validate:"required,strongpassword,max=72"`
+	NewPassword string `json:"new_password" validate:"required,strongpassword,max=72,maxbytes=72"`
 }
 
 // ForgotPasswordResponse is returned for password reset requests

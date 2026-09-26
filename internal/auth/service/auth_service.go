@@ -31,6 +31,7 @@ var (
 	ErrPasswordMismatch     = errors.New("current password is incorrect")
 	ErrCannotDeleteSelf     = errors.New("cannot delete your own account")
 	ErrCannotDemoteSelf     = errors.New("cannot change your own role")
+	ErrLastAdmin            = errors.New("the instance must keep at least one administrator")
 	ErrRegistrationDisabled = errors.New("new user registration is disabled")
 	ErrEmailNotAllowed      = errors.New("email address is not allowed to register")
 	ErrAccountLocked        = errors.New("too many failed login attempts, try again later")
@@ -42,15 +43,29 @@ const (
 	loginAttemptsPrefix = "login_attempts:"
 )
 
-// UserRepository defines the interface for user repository operations
+// UserRepository defines the interface for user repository operations. It is
+// deliberately the slice of the repository AuthService actually calls — the
+// first-user bootstrap primitive (CreateFirstUser) and the ordinary account
+// reads/writes — and nothing else. In particular the old split role-decision
+// read (DetermineRoleAtomically) is gone so the unsafe count-then-insert
+// pattern it embodies cannot quietly return.
 type UserRepository interface {
 	Create(ctx context.Context, user *models.User) error
+	// CreateFirstUser inserts a user, refusing with ErrFirstUserExists when the
+	// table already has a row, atomically with the emptiness check. Register
+	// uses it so the "first user is the administrator" decision cannot race.
+	CreateFirstUser(ctx context.Context, user *models.User) error
+	// FirstUserCreated is the durable "has the instance ever been bootstrapped?"
+	// read (app_state.first_user_created, set transactionally by
+	// CreateFirstUser). It is what lets a steady-state registration (the common
+	// case) skip the global first-user advisory lock entirely; only an instance
+	// that has never been bootstrapped — or one whose marker cannot be read —
+	// falls back to CreateFirstUser's locked transition.
+	FirstUserCreated(ctx context.Context) (bool, error)
 	GetByID(ctx context.Context, id uuid.UUID) (*models.User, error)
 	GetByEmail(ctx context.Context, email string) (*models.User, error)
 	Update(ctx context.Context, user *models.User) error
 	Delete(ctx context.Context, id uuid.UUID) error
-	Count(ctx context.Context) (int, error)
-	DetermineRoleAtomically(ctx context.Context) (string, error)
 	List(ctx context.Context) ([]*models.User, error)
 	UpdateRole(ctx context.Context, userID uuid.UUID, role string) error
 	UpdatePassword(ctx context.Context, userID uuid.UUID, passwordHash string) error
@@ -115,30 +130,40 @@ func NewAuthService(
 	}
 }
 
-// Register creates a new user account
+// Register creates a new user account.
+//
+// The first account of an instance is the administrator and is exempt from the
+// email allow-list — that is the open-registration variant of bootstrapping a
+// fresh instance. "First" is decided by the same atomic repository primitive
+// the bootstrap flow uses (CreateFirstUser), not by a count-then-insert: the
+// check and the INSERT share one advisory lock, so a racing bootstrap and a
+// racing registration cannot both become the first — and therefore the only —
+// administrator.
+//
+// Only the very first registration needs that lock. The app_state
+// first_user_created marker is the persisted "bootstrap completed" flag — set
+// once, transactionally with the first account, and never cleared — so once it
+// exists, an ordinary registration makes no first-user decision at all and
+// takes the cheap unlocked fast path (FirstUserCreated → allow-list → Create)
+// without ever entering the global advisory lock that serialises the
+// empty-instance transition. The locked path is reserved for instances the fast
+// read finds unbootstrapped — or cannot read, where the fallback is the same
+// safe decision as a read that returned "not created yet".
 func (s *AuthService) Register(ctx context.Context, req *models.RegisterRequest) (*models.AuthResponse, error) {
+	// Registration off is registration off for *everyone*, first user included.
+	// The first-account path for a closed instance is the bootstrap flow (with
+	// its boot key), not a loophole in this gate — otherwise disabling
+	// registration would be cosmetics instead of a boundary. Checked before the
+	// bcrypt hash and before any advisory lock, so a closed instance is not a
+	// CPU sink and does not contend on the lock the legitimate bootstrap needs.
+	if !s.allowedRegister {
+		return nil, ErrRegistrationDisabled
+	}
+
 	// Hash password first (expensive operation, do outside any lock)
 	passwordHash, err := bcrypt.GenerateFromPassword([]byte(req.Password), s.bcryptCost)
 	if err != nil {
 		return nil, fmt.Errorf("failed to hash password: %w", err)
-	}
-
-	// Determine role atomically: count + create in a single call to prevent
-	// TOCTOU race where multiple concurrent requests could all see count=0
-	// and all become admin.
-	role, err := s.userRepo.DetermineRoleAtomically(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to determine role: %w", err)
-	}
-
-	// If not the first user, check registration restrictions
-	if role != models.RoleAdmin {
-		if !s.allowedRegister {
-			return nil, ErrRegistrationDisabled
-		}
-		if !validator.EmailMatches(req.Email, s.allowedEmails) {
-			return nil, ErrEmailNotAllowed
-		}
 	}
 
 	// Determine locale (default to English if not provided)
@@ -147,12 +172,59 @@ func (s *AuthService) Register(ctx context.Context, req *models.RegisterRequest)
 		locale = req.Locale
 	}
 
-	// Create user
+	// Steady-state fast path: a durable marker read that finds the instance was
+	// bootstrapped means this registration is one of the crowd — allow-list,
+	// ordinary role, no global first-user lock. The marker is set once with the
+	// first account and never cleared, so deleting users cannot reopen the
+	// bootstrap decision. Failing to read the marker falls through to the locked
+	// path, which is the same answer an "unbootstrapped" read would give.
+	if configured, err := s.userRepo.FirstUserCreated(ctx); err == nil && configured {
+		return s.registerOrdinary(ctx, req, string(passwordHash), locale)
+	}
+
+	// First user becomes admin. CreateFirstUser refuses (ErrFirstUserExists) when
+	// a racing request already claimed the row, so "am I the first?" and "insert
+	// me" are one atomic decision — exactly the primitive /bootstrap uses. The
+	// loser of that race lands in the ordinary path: the instance is now
+	// configured, so the allow-list decides.
 	user := &models.User{
 		Email:        req.Email,
 		PasswordHash: string(passwordHash),
 		DisplayName:  req.DisplayName,
-		Role:         role,
+		Role:         models.RoleAdmin,
+		Locale:       locale,
+		Timezone:     "Europe/Paris",
+	}
+	user.ID = uuid.New()
+
+	if err := s.userRepo.CreateFirstUser(ctx, user); err != nil {
+		if errors.Is(err, repository.ErrUserAlreadyExists) {
+			return nil, ErrUserAlreadyExists
+		}
+		if !errors.Is(err, repository.ErrFirstUserExists) {
+			return nil, fmt.Errorf("failed to create user: %w", err)
+		}
+		// A racing first user won the slot: fall back to the ordinary path.
+		return s.registerOrdinary(ctx, req, string(passwordHash), locale)
+	}
+
+	// Generate tokens
+	return s.generateAuthResponse(ctx, user)
+}
+
+// registerOrdinary is the steady-state registration: the instance already has a
+// user, so the email allow-list applies and the account is a plain user. It is
+// deliberately lock-free — there is no first-user decision left to make.
+func (s *AuthService) registerOrdinary(ctx context.Context, req *models.RegisterRequest, passwordHash, locale string) (*models.AuthResponse, error) {
+	if !validator.EmailMatches(req.Email, s.allowedEmails) {
+		return nil, ErrEmailNotAllowed
+	}
+
+	user := &models.User{
+		Email:        req.Email,
+		PasswordHash: passwordHash,
+		DisplayName:  req.DisplayName,
+		Role:         models.RoleUser,
 		Locale:       locale,
 		Timezone:     "Europe/Paris",
 	}
@@ -165,7 +237,6 @@ func (s *AuthService) Register(ctx context.Context, req *models.RegisterRequest)
 		return nil, fmt.Errorf("failed to create user: %w", err)
 	}
 
-	// Generate tokens
 	return s.generateAuthResponse(ctx, user)
 }
 
@@ -432,7 +503,14 @@ func (s *AuthService) UpdateUserRole(ctx context.Context, currentUserID, targetU
 		return ErrUserNotFound
 	}
 
-	return s.userRepo.UpdateRole(ctx, uid, role)
+	if err := s.userRepo.UpdateRole(ctx, uid, role); err != nil {
+		if errors.Is(err, repository.ErrLastAdmin) {
+			return ErrLastAdmin
+		}
+		return err
+	}
+
+	return nil
 }
 
 // DeleteUser deletes a user (admin only)
@@ -446,13 +524,27 @@ func (s *AuthService) DeleteUser(ctx context.Context, currentUserID, targetUserI
 		return ErrUserNotFound
 	}
 
-	return s.userRepo.Delete(ctx, uid)
+	if err := s.userRepo.Delete(ctx, uid); err != nil {
+		if errors.Is(err, repository.ErrLastAdmin) {
+			return ErrLastAdmin
+		}
+		return err
+	}
+
+	return nil
 }
 
-// generateAuthResponse issues the access/refresh token pair and persists the refresh
-// token hash. The refresh token write is a synchronous database call on the request
-// path, so it runs under the caller's context: a client disconnect, a request deadline
-// or a server shutdown must be able to cancel it.
+// IssueSession is the one place a fresh session is created: it issues the
+// access/refresh token pair and persists the refresh token hash. Register,
+// Login and the bootstrap flow all end on it, so none of them can drift apart
+// in what a signed-in response looks like. The refresh token write is a
+// synchronous database call on the request path, so it runs under the caller's
+// context: a client disconnect, a request deadline or a server shutdown must be
+// able to cancel it.
+func (s *AuthService) IssueSession(ctx context.Context, user *models.User) (*models.AuthResponse, error) {
+	return s.generateAuthResponse(ctx, user)
+}
+
 func (s *AuthService) generateAuthResponse(ctx context.Context, user *models.User) (*models.AuthResponse, error) {
 	// Generate access token
 	accessToken, err := s.jwtManager.GenerateAccessToken(user.ID.String(), user.Email, user.Role)

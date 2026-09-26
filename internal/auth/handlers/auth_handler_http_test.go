@@ -786,6 +786,30 @@ func TestUpdateUserRole(t *testing.T) {
 			t.Errorf("status = %d, want 400", rec.Code)
 		}
 	})
+
+	t.Run("400 when the repository refuses the last-admin demotion", func(t *testing.T) {
+		// The repository guard trips (ErrLastAdmin) when demoting the last
+		// administrator; the handler must surface it as a client error, not a 500.
+		r := newRig(t, rigOptions{
+			allowedRegister: true,
+			users: &mockUserRepository{
+				user:    admin,
+				roleErr: repository.ErrLastAdmin,
+			},
+		})
+
+		target := uuid.New().String()
+		req := withRoute(post("/api/v1/auth/admin/users/"+target+"/role", `{"role":"user"}`), "id", target)
+		rec := httptest.NewRecorder()
+		r.handler.UpdateUserRole(rec, asUser(req, admin.ID))
+
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("status = %d, want 400 (%q)", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "last administrator") {
+			t.Errorf("body does not explain the refusal: %q", rec.Body.String())
+		}
+	})
 }
 
 func TestDeleteUserCannotDeleteYourself(t *testing.T) {
@@ -800,6 +824,31 @@ func TestDeleteUserCannotDeleteYourself(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400 (%q)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDeleteUserCannotRemoveLastAdmin(t *testing.T) {
+	admin := existingUser(t, "Correct-Horse-9")
+	admin.Role = models.RoleAdmin
+	r := newRig(t, rigOptions{
+		allowedRegister: true,
+		users: &mockUserRepository{
+			user: admin,
+			err:  repository.ErrLastAdmin,
+		},
+	})
+
+	target := uuid.New().String()
+	req := withRoute(httptest.NewRequest(http.MethodDelete, "/api/v1/auth/admin/users/"+target, nil),
+		"id", target)
+	rec := httptest.NewRecorder()
+	r.handler.DeleteUser(rec, asUser(req, admin.ID))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 (%q)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "last administrator") {
+		t.Errorf("body does not explain the refusal: %q", rec.Body.String())
 	}
 }
 
@@ -860,14 +909,16 @@ func TestListUsersReportsAFailure(t *testing.T) {
 	}
 }
 
-// TestTheFirstUserBypassesTheRestrictions pins the bootstrap rule. On a fresh instance
-// the registration switch and the email allowlist are both skipped for the very first
-// account, which then becomes admin — otherwise a self-hosted operator who shipped with
-// ALLOWED_REGISTER=false could never create the account that would let them change it.
-func TestTheFirstUserBypassesTheRestrictions(t *testing.T) {
+// TestFirstUserCannotSlipPastADisabledRegistration pins the policy on a fresh
+// instance: with ALLOWED_REGISTER=false the very first account is refused too,
+// because a closed instance stands up through /bootstrap and its boot key, not
+// through a loophole in the registration gate. This is the regression test that
+// keeps "disable registration" from being a cosmetic setting an unconfigured
+// instance could still register around.
+func TestFirstUserCannotSlipPastADisabledRegistration(t *testing.T) {
 	r := newRig(t, rigOptions{
 		allowedRegister: false,
-		allowedEmails:   []string{"nobody@else.test"},
+		allowedEmails:   []string{"ada@example.test"},
 		users:           &mockUserRepository{count: 0},
 	})
 
@@ -875,15 +926,7 @@ func TestTheFirstUserBypassesTheRestrictions(t *testing.T) {
 	r.handler.Register(rec, post("/api/v1/auth/register",
 		`{"email":"ada@example.test","password":"Correct-Horse-9","display_name":"Ada"}`))
 
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("the first user was refused: %d (%q)", rec.Code, rec.Body.String())
-	}
-
-	var payload models.AuthResponse
-	if err := json.Unmarshal(decode(t, rec).Data, &payload); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if payload.User == nil || payload.User.Role != models.RoleAdmin {
-		t.Errorf("the first user is %+v, want the admin role", payload.User)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for registration on a closed instance (%q)", rec.Code, rec.Body.String())
 	}
 }
