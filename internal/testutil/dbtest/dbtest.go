@@ -87,12 +87,29 @@ func Pool(t *testing.T) *pgxpool.Pool {
 // table another package might be using.
 func Cleanup(t *testing.T, pool *pgxpool.Pool, sql string, args ...any) {
 	t.Helper()
+	CleanupContext(context.Background(), t, pool, sql, args...)
+}
+
+// CleanupContext is Cleanup with an explicit cleanup context, for helpers (and
+// subtest fixtures) that already hold a request-scoped context.
+//
+// The cleanup must run even when the operation under test gives up: a test that
+// hits its deadline, cancels the context, or fails before its cleanup phase is
+// exactly the one whose fixtures most need removing. Deriving the cleanup
+// timeout from the raw request context would reverse that guarantee (a cancelled
+// parent cancels the cleanup with it, so one failing test would contaminate the
+// shared database for every later test and package). context.WithoutCancel
+// detaches the parent's cancellation and deadline while still inheriting from
+// it, so the relationship stays explicit for contextcheck and the timeout below
+// is the only thing that can bound the cleanup.
+func CleanupContext(ctx context.Context, t *testing.T, pool *pgxpool.Pool, sql string, args ...any) {
+	t.Helper()
 
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
 
-		if _, err := pool.Exec(ctx, sql, args...); err != nil {
+		if _, err := pool.Exec(cctx, sql, args...); err != nil {
 			t.Logf("cleanup failed (%s): %v", sql, err)
 		}
 	})
