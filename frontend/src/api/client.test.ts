@@ -254,6 +254,55 @@ describe('apiClient', () => {
       expect(posted).toEqual([]);
     });
 
+    it('on a public route, resets the account-scoped stores when another tab signs out', async () => {
+      // A real browser: A's user and calendar list (capability ids included) live in
+      // this tab's stores, and the BroadcastChannel reports that another tab signed
+      // A out. The receiving side must drop the token *and* the stores, because on a
+      // public calendar link there is no navigation to wipe them.
+      const { createPinia, setActivePinia } = await import('pinia');
+      const { useAuthStore } = await import('@/stores/auth');
+      const { useCalendarStore } = await import('@/stores/calendar');
+      const { registerRemoteSignoutListener } = await import('@/stores/remoteSignout');
+
+      setActivePinia(createPinia());
+      const authStore = useAuthStore();
+      authStore.user = {
+        id: 'u-a',
+        email: 'a@example.test',
+        display_name: 'A',
+        role: 'user',
+      } as never;
+      const calendarStore = useCalendarStore();
+      calendarStore.calendars = [{ id: 'c-1', name: 'A-owned', participants: [] }] as never;
+      calendarStore.calendarsForUser = 'u-a';
+
+      routeMeta.public = true;
+      apiClient.setToken('a-token');
+
+      const events: string[] = [];
+      const listener = (event: Event) => events.push(event.type);
+      window.addEventListener('whento:remote-signout', listener);
+      const unsubscribe = registerRemoteSignoutListener();
+      try {
+        const channel = (apiClient as unknown as { channel: BroadcastChannel | null }).channel;
+        const onMessage = channel?.onmessage as unknown as
+          ((event: MessageEvent) => void) | undefined;
+        onMessage?.({ data: { type: 'logout' } } as MessageEvent);
+
+        expect(apiClient.hasSession()).toBe(false);
+        expect(events).toContain('whento:remote-signout');
+        // The previous account's state is gone, so a later visit cannot reuse it.
+        expect(authStore.user).toBeNull();
+        expect(calendarStore.calendars).toEqual([]);
+        expect(calendarStore.calendarsForUser).toBeNull();
+        // A public calendar link has no account to sign back in to: no navigation.
+        expect(window.location.href).toBe('');
+      } finally {
+        window.removeEventListener('whento:remote-signout', listener);
+        unsubscribe();
+      }
+    });
+
     it('on a public route, does not dispatch the app event when the message is a token', () => {
       routeMeta.public = true;
       const events: string[] = [];
@@ -1404,6 +1453,62 @@ describe('apiClient', () => {
       expect(posted).toEqual([]);
     });
 
+    // A wrong second-factor code is a *rejection* of the submitted credential, not an
+    // expired session: `/auth/mfa/verify` authenticates with the body-carried pending
+    // token and code. A 401 must be returned straight to the form — refreshing (which,
+    // with no refresh cookie yet, itself 401s) would force a logout that clears the
+    // still-valid pending login and bounces the user back to the password/passkey stage.
+    it('returns an invalid MFA code 401 to the form, preserving the pending login', async () => {
+      const { createPinia, setActivePinia } = await import('pinia');
+      const { useAuthStore } = await import('@/stores/auth');
+      const { registerRemoteSignoutListener } = await import('@/stores/remoteSignout');
+
+      setActivePinia(createPinia());
+      const authStore = useAuthStore();
+      authStore.user = null;
+      authStore.setTempToken('valid-pending-token');
+      const unsubscribe = registerRemoteSignoutListener();
+
+      try {
+        // /verify-mfa is a public route: the visitor has no access token yet and may not
+        // even have a refresh cookie, so a refresh attempt would also 401.
+        routeMeta.public = true;
+
+        let mfaCalls = 0;
+        const seen = withAdapter(config => {
+          if (config.url === '/auth/mfa/verify') {
+            mfaCalls += 1;
+            // First submission is rejected as a wrong code; a corrected retry succeeds.
+            return mfaCalls === 1
+              ? unauthorized()
+              : ok({ access_token: 'access-token', expires_in: 3600, user: { id: 'u-1' } });
+          }
+          if (config.url === '/auth/refresh') return unauthorized();
+          return ok({});
+        });
+
+        await expect(
+          apiClient.post('/auth/mfa/verify', { temp_token: 'valid-pending-token', code: '000000' })
+        ).rejects.toBeTruthy();
+
+        // No refresh was attempted, the pending login survived, and nothing navigated or
+        // signed out.
+        expect(seen.map(r => r.url)).toEqual(['/auth/mfa/verify']);
+        expect(authStore.tempToken).toBe('valid-pending-token');
+        expect(window.location.href).toBe('');
+        expect(apiClient.hasSession()).toBe(false);
+        expect(authStore.user).toBeNull();
+
+        // A corrected code can still complete the same pending login.
+        await expect(
+          apiClient.post('/auth/mfa/verify', { temp_token: 'valid-pending-token', code: '123456' })
+        ).resolves.toEqual({ access_token: 'access-token', expires_in: 3600, user: { id: 'u-1' } });
+        expect(seen.map(r => r.url)).toEqual(['/auth/mfa/verify', '/auth/mfa/verify']);
+      } finally {
+        unsubscribe();
+      }
+    });
+
     // A rejected WebAuthn assertion on `/auth/passkey/login/finish` is a *rejection* of
     // the submitted credential, not an expired access session: the backend returns 401
     // for ErrPasskeyNotFound/ErrInvalidCredential. A 401 must be returned straight to
@@ -1622,6 +1727,48 @@ describe('apiClient', () => {
 
       expect(apiClient.hasSession()).toBe(false);
       expect(window.location.href).toBe('');
+    });
+
+    it('resets the account stores on a public route when the refresh itself fails', async () => {
+      const { createPinia, setActivePinia } = await import('pinia');
+      const { useAuthStore } = await import('@/stores/auth');
+      const { useCalendarStore } = await import('@/stores/calendar');
+      const { useUnifiedFeedStore } = await import('@/stores/unifiedFeed');
+      const { registerRemoteSignoutListener } = await import('@/stores/remoteSignout');
+
+      setActivePinia(createPinia());
+      const authStore = useAuthStore();
+      authStore.user = { id: 'u-1', email: 'a@x.test', display_name: 'A', role: 'user' } as never;
+      const calendarStore = useCalendarStore();
+      calendarStore.calendars = [{ id: 'c-1', name: 'A-owned', participants: [] }] as never;
+      calendarStore.calendarsForUser = 'u-1';
+      const feedStore = useUnifiedFeedStore();
+      feedStore.config = { configured: true } as never;
+      const unsubscribe = registerRemoteSignoutListener();
+      try {
+        // A visitor on a public calendar link may still be holding a (now expired)
+        // session. The refresh cookie is dead, but there is no account to sign back
+        // in to, so the client must neither navigate nor leave the expired account
+        // rendered as the owner.
+        routeMeta.public = true;
+        apiClient.setToken('expired');
+
+        withAdapter(() => unauthorized());
+
+        await expect(apiClient.get('/calendars')).rejects.toBeTruthy();
+
+        expect(apiClient.hasSession()).toBe(false);
+        expect(window.location.href).toBe('');
+        // The stale user id and its matching calendarsForUser marker would otherwise
+        // still pass the public view's ownership check; the config would keep the old
+        // account's capability URL. All of it must be gone.
+        expect(authStore.user).toBeNull();
+        expect(calendarStore.calendars).toEqual([]);
+        expect(calendarStore.calendarsForUser).toBeNull();
+        expect(feedStore.config).toBeNull();
+      } finally {
+        unsubscribe();
+      }
     });
   });
 
