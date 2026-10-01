@@ -25,6 +25,10 @@ import (
 
 func newOwner(t *testing.T, pool *pgxpool.Pool) *authModels.User {
 	t.Helper()
+	// A user row is instance-wide state as far as the first-user tests are
+	// concerned; serialize with them (and with the other packages' user-creating
+	// fixtures) for the test's lifetime.
+	dbtest.LockSingletonAccounts(dbtest.Context(t), t, pool)
 
 	id := uuid.New()
 	user := &authModels.User{

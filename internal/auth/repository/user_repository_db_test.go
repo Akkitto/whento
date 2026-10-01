@@ -37,6 +37,12 @@ import (
 func newUser(ctx context.Context, t *testing.T, pool *pgxpool.Pool, configure ...func(*models.User)) *models.User {
 	t.Helper()
 
+	// A user row is instance-wide state as far as the first-user tests are
+	// concerned; serialize against them (and against the other packages'
+	// fixtures) for the test's lifetime. A no-op when the calling test already
+	// holds the lock.
+	dbtest.LockSingletonAccounts(ctx, t, pool)
+
 	id := uuid.New()
 	user := &models.User{
 		Email:        fmt.Sprintf("repo-%s@example.test", id),
@@ -460,6 +466,11 @@ func TestListAndCountSeeCreatedUsers(t *testing.T) {
 func markerFixture(ctx context.Context, t *testing.T, pool *pgxpool.Pool, want bool) {
 	t.Helper()
 
+	// The marker is the other half of the instance-wide account state; the
+	// first-user tests take the lock before calling this, and this call is a
+	// no-op when they did.
+	dbtest.LockSingletonAccounts(ctx, t, pool)
+
 	var prior bool
 	if err := pool.QueryRow(ctx, `SELECT first_user_created FROM app_state WHERE id = 1`).Scan(&prior); err != nil {
 		t.Fatalf("read marker: %v", err)
@@ -484,10 +495,20 @@ func TestCreateFirstUser(t *testing.T) {
 	repo := repository.NewUserRepository(pool)
 	ctx := dbtest.Context(t)
 
+	// Which branch applies is decided by instance-wide state — the user count and
+	// app_state flag — not by rows this test owns. Another package's DB tests run
+	// as a concurrent process and take the same advisory lock when they create a
+	// user, so holding it for this test's whole lifetime is what makes the branch
+	// decided here still hold at the assertion below (the audit caught a package
+	// inserting and then cleaning up a user between the count snapshot and the
+	// call, flipping the expected outcome).
+	dbtest.LockSingletonAccounts(ctx, t, pool)
+
 	first := newUser(ctx, t, pool)
 
 	// The shared database may or may not already hold users; document which
-	// branch the rest of this test is in.
+	// branch the rest of this test is in. The count is owned by the lock above,
+	// so it cannot change while this test runs.
 	count, err := repo.Count(ctx)
 	if err != nil {
 		t.Fatalf("Count: %v", err)
@@ -511,6 +532,9 @@ func TestCreateFirstUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateFirstUser on an empty instance: %v", err)
 	}
+	// Own the row the insert created: it must not leak into the shared table and
+	// flip the empty-table precondition of TestCreateFirstUserConcurrent.
+	dbtest.CleanupContext(ctx, t, pool, `DELETE FROM users WHERE id = $1`, first.ID)
 
 	// The slot is now taken; a second call must be refused.
 	second := newUser(ctx, t, pool)
@@ -558,6 +582,13 @@ func newSingleConnPool(t *testing.T, ctx context.Context) *pgxpool.Pool {
 func TestCreateFirstUserConcurrent(t *testing.T) {
 	pool := dbtest.Pool(t)
 	ctx := dbtest.Context(t)
+
+	// The race needs the table to be empty at the start and stays meaningful
+	// only for as long as nothing else inserts or removes users. Own the
+	// instance-wide account state for the whole test, so the empty-table check
+	// below is decided from state that cannot be invalidated by another
+	// concurrently running package binary.
+	dbtest.LockSingletonAccounts(ctx, t, pool)
 
 	// Only meaningful against an empty table: the race is over the *first* row.
 	existing := repository.NewUserRepository(pool)
@@ -686,6 +717,12 @@ func TestHasUsers(t *testing.T) {
 	pool := dbtest.Pool(t)
 	repo := repository.NewUserRepository(pool)
 	ctx := dbtest.Context(t)
+
+	// The assertion compares two reads of instance-wide state: a user another
+	// package's fixture inserts or removes between the Count and HasUsers calls
+	// would flip the pairing. Own the singleton account state for the test so
+	// the pairing cannot be disturbed mid-run.
+	dbtest.LockSingletonAccounts(ctx, t, pool)
 
 	count, err := repo.Count(ctx)
 	if err != nil {
