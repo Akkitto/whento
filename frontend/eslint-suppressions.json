@@ -1,7 +1,7 @@
 {
   "src/api/client.ts": {
     "@typescript-eslint/no-explicit-any": {
-      "count": 8
+      "count": 6
     }
   },
   "src/api/mfa.ts": {
