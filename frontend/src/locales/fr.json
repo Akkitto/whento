@@ -243,7 +243,26 @@
       "downloadCodes": "Télécharger les codes"
     }
   },
-  "dashboard": {},
+  "dashboard": {
+    "sortBy": "Trier par",
+    "sortNameAsc": "Tri alphabétique (A-Z)",
+    "sortNameDesc": "Tri alphabétique (Z-A)",
+    "sortCustom": "Ordre personnalisé",
+    "viewAs": "Vue",
+    "viewCards": "Cartes",
+    "viewList": "Liste",
+    "viewExpanded": "Liste détaillée",
+    "viewCompact": "Liste compacte",
+    "reorderHint": "Faites glisser un calendrier par sa poignée, ou utilisez ses boutons haut/bas, pour définir votre propre ordre. Les calendriers épinglés restent en haut.",
+    "pinned": "Épinglés",
+    "others": "Autres calendriers",
+    "dragHandle": "Poignée de déplacement",
+    "moveUp": "Monter",
+    "moveDown": "Descendre",
+    "pinCalendar": "Épingler en haut",
+    "unpinCalendar": "Désépingler",
+    "openCalendar": "Ouvrir le calendrier {name}"
+  },
   "calendar": {
     "calendar": "Calendrier",
     "myCalendars": "Mes calendriers",

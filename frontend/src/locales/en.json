@@ -243,7 +243,26 @@
       "downloadCodes": "Download Codes"
     }
   },
-  "dashboard": {},
+  "dashboard": {
+    "sortBy": "Sort by",
+    "sortNameAsc": "Name (A-Z)",
+    "sortNameDesc": "Name (Z-A)",
+    "sortCustom": "Custom order",
+    "viewAs": "View as",
+    "viewCards": "Cards",
+    "viewList": "List",
+    "viewExpanded": "Expanded list",
+    "viewCompact": "Compact list",
+    "reorderHint": "Drag a calendar by its handle, or use its up/down buttons, to set your own order. Pinned calendars stay on top.",
+    "pinned": "Pinned",
+    "others": "Other calendars",
+    "dragHandle": "Drag to reorder",
+    "moveUp": "Move up",
+    "moveDown": "Move down",
+    "pinCalendar": "Pin to top",
+    "unpinCalendar": "Unpin",
+    "openCalendar": "Open calendar {name}"
+  },
   "calendar": {
     "calendar": "Calendar",
     "myCalendars": "My calendars",
