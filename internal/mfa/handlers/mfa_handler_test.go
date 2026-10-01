@@ -269,6 +269,15 @@ func (s *stubAuthUserRepo) FirstUserCreated(context.Context) (bool, error) {
 }
 func (s *stubAuthUserRepo) Update(context.Context, *authModels.User) error { return nil }
 
+func (s *stubAuthUserRepo) UpdateProfile(
+	context.Context,
+	uuid.UUID,
+	*string,
+	*string,
+	*string,
+) (*authModels.User, error) {
+	return s.user, nil
+}
 func (s *stubAuthUserRepo) Delete(context.Context, uuid.UUID) error { return nil }
 func (s *stubAuthUserRepo) CreateFirstUser(context.Context, *authModels.User) error {
 	return nil

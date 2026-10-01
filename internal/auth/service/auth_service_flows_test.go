@@ -49,9 +49,13 @@ type fakeUserRepo struct {
 	// connection, timeout, ...), distinct from the genuine ErrUserNotFound answer.
 	getByIDErr error
 	updateErr  error
-	listErr    error
-	deleteErr  error
-	roleSetErr error
+	// concurrentDisplayName is applied inside UpdateProfile after the request's own
+	// fields, standing in for a write that committed between this request's read and
+	// its UPDATE ... RETURNING.
+	concurrentDisplayName string
+	listErr               error
+	deleteErr             error
+	roleSetErr            error
 
 	created         *models.User
 	passwordUpdated string
@@ -124,6 +128,35 @@ func (f *fakeUserRepo) GetByEmail(_ context.Context, email string) (*models.User
 }
 
 func (f *fakeUserRepo) Update(context.Context, *models.User) error { return f.updateErr }
+
+func (f *fakeUserRepo) UpdateProfile(
+	_ context.Context,
+	userID uuid.UUID,
+	displayName *string,
+	locale *string,
+	timezone *string,
+) (*models.User, error) {
+	user, ok := f.byID[userID]
+	if !ok {
+		return nil, repository.ErrUserNotFound
+	}
+	if displayName != nil {
+		user.DisplayName = *displayName
+	}
+	if locale != nil {
+		user.Locale = *locale
+	}
+	if timezone != nil {
+		user.Timezone = *timezone
+	}
+	if f.concurrentDisplayName != "" {
+		user.DisplayName = f.concurrentDisplayName
+	}
+	if f.updateErr != nil {
+		return nil, f.updateErr
+	}
+	return user, nil
+}
 
 func (f *fakeUserRepo) Delete(_ context.Context, id uuid.UUID) error {
 	f.deleted = id
@@ -1005,6 +1038,26 @@ func TestRefreshTokenRejects(t *testing.T) {
 				t.Errorf("error = %v, want ErrInvalidToken", err)
 			}
 		})
+	}
+}
+
+func TestUpdateProfileResponseIsTheWrittenRow(t *testing.T) {
+	fixture := newFixture(t, nil)
+	user := fixture.withUser(t, "user@example.com", "Str0ng!Passw0rd", models.RoleUser)
+	fixture.users.concurrentDisplayName = "from-other-request"
+	locale := "fr"
+
+	updated, err := fixture.service.UpdateProfile(context.Background(), user.ID.String(), &models.UpdateProfileRequest{
+		Locale: &locale,
+	})
+	if err != nil {
+		t.Fatalf("UpdateProfile: %v", err)
+	}
+	if updated.Locale != "fr" {
+		t.Errorf("locale = %q, want fr", updated.Locale)
+	}
+	if updated.DisplayName != "from-other-request" {
+		t.Errorf("display name = %q, want the row returned by the write, not the pre-update snapshot", updated.DisplayName)
 	}
 }
 

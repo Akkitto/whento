@@ -65,6 +65,19 @@ func (m *mockUserRepository) Update(ctx context.Context, user *models.User) erro
 	return m.err
 }
 
+func (m *mockUserRepository) UpdateProfile(
+	ctx context.Context,
+	userID uuid.UUID,
+	displayName *string,
+	locale *string,
+	timezone *string,
+) (*models.User, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	return m.user, nil
+}
+
 func (m *mockUserRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	return m.err
 }

@@ -64,6 +64,13 @@ type UserRepository interface {
 	GetByID(ctx context.Context, id uuid.UUID) (*models.User, error)
 	GetByEmail(ctx context.Context, email string) (*models.User, error)
 	Update(ctx context.Context, user *models.User) error
+	UpdateProfile(
+		ctx context.Context,
+		userID uuid.UUID,
+		displayName *string,
+		locale *string,
+		timezone *string,
+	) (*models.User, error)
 	Delete(ctx context.Context, id uuid.UUID) error
 	List(ctx context.Context) ([]*models.User, error)
 	UpdateRole(ctx context.Context, userID uuid.UUID, role string) error
@@ -458,27 +465,19 @@ func (s *AuthService) UpdateProfile(ctx context.Context, userID string, req *mod
 		return nil, ErrUserNotFound
 	}
 
-	user, err := s.userRepo.GetByID(ctx, uid)
-	if err != nil {
+	// The pre-update read only checks the account exists. The response is the row
+	// RETURNING from the write, so a field another request committed concurrently is
+	// not reported from this stale snapshot.
+	if _, err := s.userRepo.GetByID(ctx, uid); err != nil {
 		return nil, ErrUserNotFound
 	}
 
-	// Update fields if provided
-	if req.DisplayName != nil {
-		user.DisplayName = *req.DisplayName
-	}
-	if req.Locale != nil {
-		user.Locale = *req.Locale
-	}
-	if req.Timezone != nil {
-		user.Timezone = *req.Timezone
-	}
-
-	if err := s.userRepo.Update(ctx, user); err != nil {
+	updated, err := s.userRepo.UpdateProfile(ctx, uid, req.DisplayName, req.Locale, req.Timezone)
+	if err != nil {
 		return nil, fmt.Errorf("failed to update user: %w", err)
 	}
 
-	return user, nil
+	return updated, nil
 }
 
 // ChangePassword changes the current user's password

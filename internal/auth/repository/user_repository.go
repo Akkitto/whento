@@ -155,6 +155,65 @@ func (r *UserRepository) GetByEmail(ctx context.Context, email string) (*models.
 	return user, nil
 }
 
+// UpdateProfile updates only the profile columns present in the request.
+//
+// A partial `COALESCE` write rather than a whole-row rewrite: the previous
+// read-modify-write flow wrote `display_name`, `locale` and `timezone` together from a
+// snapshot read earlier, so two concurrent partial saves (e.g. the display-name form
+// and the preferences form from two tabs) would each overwrite the other's
+// untouched-by-them field with its stale value. Writing only the columns a request
+// actually carries removes that lost-update window; the row can never regress a field
+// this request did not mean to touch.
+func (r *UserRepository) UpdateProfile(
+	ctx context.Context,
+	userID uuid.UUID,
+	displayName *string,
+	locale *string,
+	timezone *string,
+) (*models.User, error) {
+	query := `
+		UPDATE users
+		SET display_name = COALESCE($2, display_name),
+		    locale = COALESCE($3, locale),
+		    timezone = COALESCE($4, timezone),
+		    updated_at = NOW()
+		WHERE id = $1
+		RETURNING id, email, password_hash, display_name, role, locale, timezone,
+		          email_verified, verification_token, verification_token_expires_at,
+		          password_reset_token, password_reset_token_expires_at,
+		          magic_link_token, magic_link_token_expires_at,
+		          security_generation, created_at, updated_at`
+
+	user := &models.User{}
+	err := r.pool.QueryRow(ctx, query, userID, displayName, locale, timezone).Scan(
+		&user.ID,
+		&user.Email,
+		&user.PasswordHash,
+		&user.DisplayName,
+		&user.Role,
+		&user.Locale,
+		&user.Timezone,
+		&user.EmailVerified,
+		&user.VerificationToken,
+		&user.VerificationTokenExpiresAt,
+		&user.PasswordResetToken,
+		&user.PasswordResetTokenExpiresAt,
+		&user.MagicLinkToken,
+		&user.MagicLinkTokenExpiresAt,
+		&user.SecurityGeneration,
+		&user.CreatedAt,
+		&user.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrUserNotFound
+		}
+		return nil, fmt.Errorf("failed to update user profile: %w", err)
+	}
+
+	return user, nil
+}
+
 // Update updates a user
 func (r *UserRepository) Update(ctx context.Context, user *models.User) error {
 	query := `
