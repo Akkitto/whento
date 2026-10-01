@@ -275,6 +275,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 //	@Success		200		{object}	models.AuthResponse
 //	@Failure		400		{object}	httputil.ErrorResponse	"Invalid request body"
 //	@Failure		401		{object}	httputil.ErrorResponse	"Invalid or expired refresh token"
+//	@Failure		500		{object}	httputil.ErrorResponse	"Infrastructure failure - the presented token may still be valid; retry"
 //	@Router			/api/v1/auth/refresh [post]
 func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 	// Read refresh token from httpOnly cookie
@@ -286,8 +287,33 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.authService.RefreshToken(r.Context(), cookie.Value)
 	if err != nil {
-		httputil.Error(w, http.StatusUnauthorized, httputil.ErrCodeUnauthorized, "Invalid or expired refresh token")
-		return
+		switch {
+		// A cancelled request is the client going away, not a verdict on the credential.
+		// There is nothing to tell the browser; writing a response at all is at best
+		// useless and at worst misleads a proxy into caching a rejection.
+		case errors.Is(err, context.Canceled):
+			h.logger.Debug("refresh token request cancelled", "error", err)
+			return
+		case errors.Is(err, context.DeadlineExceeded):
+			h.logger.Warn("refresh token request exceeded its deadline", "error", err)
+			httputil.Error(w, http.StatusGatewayTimeout, httputil.ErrCodeInternal, "Failed to refresh token")
+			return
+		// Genuine rejections: the presented refresh token is invalid/expired/reused,
+		// or its subject user no longer exists. Both mean the session has to restart.
+		case errors.Is(err, service.ErrInvalidToken), errors.Is(err, service.ErrUserNotFound):
+			httputil.Error(w, http.StatusUnauthorized, httputil.ErrCodeUnauthorized, "Invalid or expired refresh token")
+			return
+		// Everything else is an infrastructure failure (unreachable database, dropped
+		// connection, failed transaction). It is not proof the presented credential is
+		// invalid, and the server cannot prove otherwise right now — the database
+		// outage may have rolled back a rotation mid-flight. Answer 500 so the browser
+		// keeps its session for a retry instead of signing out over a transient fault,
+		// and log the real cause for diagnosis.
+		default:
+			h.logger.Error("failed to refresh token", "error", err)
+			httputil.Error(w, http.StatusInternalServerError, httputil.ErrCodeInternal, "Failed to refresh token")
+			return
+		}
 	}
 
 	// Rotate refresh token cookie

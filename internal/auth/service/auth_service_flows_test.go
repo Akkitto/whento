@@ -13,6 +13,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -43,7 +44,10 @@ type fakeUserRepo struct {
 	byEmail map[string]*models.User
 	byID    map[uuid.UUID]*models.User
 
-	createErr  error
+	createErr error
+	// getByIDErr makes a user lookup fail for infrastructure reasons (a dropped
+	// connection, timeout, ...), distinct from the genuine ErrUserNotFound answer.
+	getByIDErr error
 	updateErr  error
 	listErr    error
 	deleteErr  error
@@ -101,6 +105,9 @@ func (f *fakeUserRepo) CreateFirstUser(_ context.Context, user *models.User) err
 }
 
 func (f *fakeUserRepo) GetByID(_ context.Context, id uuid.UUID) (*models.User, error) {
+	if f.getByIDErr != nil {
+		return nil, f.getByIDErr
+	}
 	if user, ok := f.byID[id]; ok {
 		return user, nil
 	}
@@ -159,15 +166,59 @@ type fakeTokenRepo struct {
 	createErr        error
 	deletedByHash    []string
 	deletedByUserIDs []uuid.UUID
+
+	// consumedOneTime mirrors the mfa_pending_nonce ledger: the same digest can
+	// only be consumed once. The mutex makes service-level concurrent finalization
+	// tests racy-free, standing in for the database INSERT's atomicity.
+	oneTimeMu       sync.Mutex
+	consumedOneTime map[string]bool
 }
 
 var _ TokenRepository = (*fakeTokenRepo)(nil)
 
 func newFakeTokenRepo() *fakeTokenRepo {
-	return &fakeTokenRepo{stored: map[string]*models.RefreshToken{}}
+	return &fakeTokenRepo{
+		stored:          map[string]*models.RefreshToken{},
+		consumedOneTime: map[string]bool{},
+	}
 }
 
-func (f *fakeTokenRepo) Create(_ context.Context, token *models.RefreshToken) error {
+// claimOneTimeNonce atomically claims a pending-MFA JTI nonce. It reports
+// whether this call is the first to claim it.
+func (f *fakeTokenRepo) claimOneTimeNonce(digest string) (bool, error) {
+	f.oneTimeMu.Lock()
+	defer f.oneTimeMu.Unlock()
+	if f.consumedOneTime[digest] {
+		return false, nil
+	}
+	f.consumedOneTime[digest] = true
+	return true, nil
+}
+
+// releaseOneTimeNonce rolls a nonce claim back, mirroring the database
+// transaction's rollback when the session insert fails.
+func (f *fakeTokenRepo) releaseOneTimeNonce(digest string) {
+	f.oneTimeMu.Lock()
+	defer f.oneTimeMu.Unlock()
+	delete(f.consumedOneTime, digest)
+}
+
+// CreatePendingMFASession mirrors the database contract: claiming the nonce and
+// inserting the session are one atomic unit. When the session insert (Create)
+// fails, the nonce claim is rolled back, so the same digest can be retried —
+// the pending token is never permanently burned by a transient failure.
+func (f *fakeTokenRepo) CreatePendingMFASession(ctx context.Context, digest string, _ time.Time, token *models.RefreshToken, generation int64) (bool, error) {
+	if ok, _ := f.claimOneTimeNonce(digest); !ok {
+		return false, nil
+	}
+	if err := f.Create(ctx, token, generation); err != nil {
+		f.releaseOneTimeNonce(digest)
+		return false, err
+	}
+	return true, nil
+}
+
+func (f *fakeTokenRepo) Create(_ context.Context, token *models.RefreshToken, _ int64) error {
 	if f.createErr != nil {
 		return f.createErr
 	}
@@ -191,10 +242,10 @@ func (f *fakeTokenRepo) DeleteByHash(_ context.Context, hash string) error {
 	return nil
 }
 
-func (f *fakeTokenRepo) DeleteByUserID(_ context.Context, userID uuid.UUID) error {
+func (f *fakeTokenRepo) DeleteByUserID(_ context.Context, userID uuid.UUID) (int64, error) {
 	f.deletedByUserIDs = append(f.deletedByUserIDs, userID)
 
-	return nil
+	return 0, nil
 }
 
 // Consume mirrors the SQL: the UPDATE carries `consumed_at IS NULL`, so only the first
@@ -211,13 +262,45 @@ func (f *fakeTokenRepo) Consume(_ context.Context, hash string) (bool, error) {
 	return true, nil
 }
 
-func (f *fakeTokenRepo) DeleteConsumedBefore(_ context.Context, userID uuid.UUID, cutoff time.Time) error {
-	for hash, token := range f.stored {
-		if token.UserID == userID && token.ConsumedAt != nil && token.ConsumedAt.Before(cutoff) {
-			delete(f.stored, hash)
+func (f *fakeTokenRepo) RevokePresentedFamily(_ context.Context, hash string) error {
+	token, ok := f.stored[hash]
+	if !ok {
+		return nil
+	}
+	for storedHash, stored := range f.stored {
+		sameFamily := token.FamilyID != "" && stored.FamilyID == token.FamilyID && stored.UserID == token.UserID
+		if storedHash == hash || sameFamily {
+			delete(f.stored, storedHash)
 		}
 	}
+	return nil
+}
 
+func (f *fakeTokenRepo) CommitRotation(
+	ctx context.Context,
+	presentedHash string,
+	successor *models.RefreshToken,
+	grace time.Duration,
+) error {
+	token, ok := f.stored[presentedHash]
+	if !ok || token.UserID != successor.UserID {
+		return repository.ErrTokenNotFound
+	}
+	if token.ConsumedAt != nil && time.Since(*token.ConsumedAt) > grace {
+		_, _ = f.DeleteByUserID(ctx, token.UserID)
+		return repository.ErrTokenReuse
+	}
+	if token.ConsumedAt == nil {
+		now := time.Now()
+		token.ConsumedAt = &now
+	}
+	if token.FamilyID == "" && successor.FamilyID != "" {
+		token.FamilyID = successor.FamilyID
+	}
+	if token.FamilyID != successor.FamilyID {
+		return repository.ErrFamilyMismatch
+	}
+	f.stored[successor.TokenHash] = successor
 	return nil
 }
 
@@ -922,6 +1005,84 @@ func TestRefreshTokenRejects(t *testing.T) {
 				t.Errorf("error = %v, want ErrInvalidToken", err)
 			}
 		})
+	}
+}
+
+func TestRefreshKeepsTheServerSessionFamily(t *testing.T) {
+	fixture := newFixture(t, nil)
+	user := fixture.withUser(t, "user@example.com", "Str0ng!Passw0rd", models.RoleUser)
+	first, err := fixture.service.Login(context.Background(), &models.LoginRequest{
+		Email: user.Email, Password: "Str0ng!Passw0rd",
+	})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if first.SessionID == "" {
+		t.Fatal("login did not issue a session id")
+	}
+	second, err := fixture.service.RefreshToken(context.Background(), first.RefreshToken)
+	if err != nil {
+		t.Fatalf("RefreshToken: %v", err)
+	}
+	if second.SessionID != first.SessionID {
+		t.Errorf("session id = %q, want %q", second.SessionID, first.SessionID)
+	}
+}
+
+func TestLegacyRotationLogoutRevokesTheSuccessor(t *testing.T) {
+	fixture := newFixture(t, nil)
+	user := fixture.withUser(t, "user@example.com", "Str0ng!Passw0rd", models.RoleUser)
+	legacyHash := repository.HashToken("legacy-cookie")
+	legacy := &models.RefreshToken{
+		UserID: user.ID, TokenHash: legacyHash, ExpiresAt: time.Now().Add(time.Hour), FamilyID: "",
+	}
+	legacy.ID = uuid.New()
+	fixture.tokens.stored[legacyHash] = legacy
+
+	successor := &models.RefreshToken{
+		UserID: user.ID, TokenHash: repository.HashToken("successor"),
+		ExpiresAt: time.Now().Add(time.Hour), FamilyID: "family-after-upgrade",
+	}
+	successor.ID = uuid.New()
+	if err := fixture.tokens.CommitRotation(context.Background(), legacyHash, successor, time.Minute); err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	if err := fixture.tokens.RevokePresentedFamily(context.Background(), legacyHash); err != nil {
+		t.Fatalf("logout: %v", err)
+	}
+	if _, ok := fixture.tokens.stored[successor.TokenHash]; ok {
+		t.Error("successor survived logout of the migrated ancestor")
+	}
+}
+
+func TestLogoutRevokesOnlyThePresentedFamily(t *testing.T) {
+	fixture := newFixture(t, nil)
+	user := fixture.withUser(t, "user@example.com", "Str0ng!Passw0rd", models.RoleUser)
+	first, err := fixture.service.Login(context.Background(), &models.LoginRequest{
+		Email: user.Email, Password: "Str0ng!Passw0rd",
+	})
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	otherHash := repository.HashToken("other-device")
+	other := &models.RefreshToken{
+		UserID:    user.ID,
+		TokenHash: otherHash,
+		ExpiresAt: time.Now().Add(time.Hour),
+		FamilyID:  "family-other-device",
+	}
+	other.ID = uuid.New()
+	fixture.tokens.stored[otherHash] = other
+
+	if err := fixture.service.Logout(context.Background(), first.RefreshToken); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+	if _, err := fixture.service.RefreshToken(context.Background(), first.RefreshToken); !errors.Is(err, ErrInvalidToken) {
+		t.Errorf("logged-out family still refreshed: %v", err)
+	}
+	if _, ok := fixture.tokens.stored[otherHash]; !ok {
+		t.Error("logout deleted a different device's refresh family")
 	}
 }
 

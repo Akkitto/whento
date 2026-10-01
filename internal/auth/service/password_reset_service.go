@@ -56,8 +56,8 @@ type PasswordResetUserStore interface {
 // PasswordResetTokenStore revokes the user's other sessions on a reset, and
 // stores the fresh auto-login pair.
 type PasswordResetTokenStore interface {
-	Create(ctx context.Context, token *models.RefreshToken) error
-	DeleteByUserID(ctx context.Context, userID uuid.UUID) error
+	Create(ctx context.Context, token *models.RefreshToken, securityGeneration int64) error
+	DeleteByUserID(ctx context.Context, userID uuid.UUID) (int64, error)
 }
 
 // PasswordResetMailer sends the reset email and reports whether one can be sent.
@@ -70,6 +70,7 @@ type PasswordResetMailer interface {
 type PasswordResetTokenIssuer interface {
 	GenerateAccessToken(userID, email, role string) (string, error)
 	GenerateRefreshToken(userID string) (string, time.Time, error)
+	IssueRefreshToken(userID, familyID string) (string, time.Time, string, error)
 }
 
 // PasswordResetService handles password reset business logic
@@ -230,13 +231,14 @@ func (s *PasswordResetService) ResetPassword(ctx context.Context, req *models.Re
 		// Non-fatal - continue with auto-login
 	}
 
-	// Invalidate all existing refresh tokens (force re-login on other devices)
-	if err := s.tokenRepo.DeleteByUserID(ctx, user.ID); err != nil {
-		s.logger.Error("failed to revoke existing tokens after password reset",
-			"user_id", user.ID,
-			"error", err.Error())
-		// Non-fatal - continue
+	// Invalidate every other session and advance the security generation before
+	// this reset publishes its own. A login that already accepted the old
+	// password presents the previous generation and is refused.
+	generation, err := s.tokenRepo.DeleteByUserID(ctx, user.ID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to revoke sessions after password reset: %w", err)
 	}
+	user.SecurityGeneration = generation
 
 	// Generate new tokens for auto-login
 	accessToken, err := s.jwtManager.GenerateAccessToken(user.ID.String(), user.Email, user.Role)
@@ -244,7 +246,7 @@ func (s *PasswordResetService) ResetPassword(ctx context.Context, req *models.Re
 		return nil, fmt.Errorf("failed to generate access token: %w", err)
 	}
 
-	refreshToken, expiresAt, err := s.jwtManager.GenerateRefreshToken(user.ID.String())
+	refreshToken, expiresAt, familyID, err := s.jwtManager.IssueRefreshToken(user.ID.String(), "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate refresh token: %w", err)
 	}
@@ -254,10 +256,11 @@ func (s *PasswordResetService) ResetPassword(ctx context.Context, req *models.Re
 		UserID:    user.ID,
 		TokenHash: repository.HashToken(refreshToken),
 		ExpiresAt: expiresAt,
+		FamilyID:  familyID,
 	}
 	storedToken.ID = uuid.New()
 
-	if err := s.tokenRepo.Create(ctx, storedToken); err != nil {
+	if err := s.tokenRepo.Create(ctx, storedToken, user.SecurityGeneration); err != nil {
 		return nil, fmt.Errorf("failed to store refresh token: %w", err)
 	}
 
@@ -269,6 +272,7 @@ func (s *PasswordResetService) ResetPassword(ctx context.Context, req *models.Re
 		AccessToken:      accessToken,
 		RefreshToken:     refreshToken,
 		RefreshExpiresAt: expiresAt,
+		SessionID:        familyID,
 		User:             toUserResponse(user),
 	}, nil
 }

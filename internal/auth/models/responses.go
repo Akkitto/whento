@@ -17,9 +17,13 @@ type AuthResponse struct {
 	// it, and the browser honestly does not need to — the cookie is complete.
 	RefreshExpiresAt time.Time `json:"-"`
 	ExpiresIn        int64     `json:"expires_in,omitempty"`
-	User             *User     `json:"user"`
-	RequireMFA       bool      `json:"require_mfa,omitempty"` // True if 2FA verification is required
-	TempToken        string    `json:"temp_token,omitempty"`  // Temporary token for 2FA flow (5min expiry)
+	// SessionID is the server-issued family of the refresh cookie this response
+	// belongs to. It is stable across rotation and new on every login, so clients
+	// can converge on the cookie's family instead of a locally guessed nonce.
+	SessionID  string `json:"session_id,omitempty"`
+	User       *User  `json:"user"`
+	RequireMFA bool   `json:"require_mfa,omitempty"` // True if 2FA verification is required
+	TempToken  string `json:"temp_token,omitempty"`  // Temporary token for 2FA flow (5min expiry)
 }
 
 // UserResponse represents a user response (public data)

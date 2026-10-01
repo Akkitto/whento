@@ -120,6 +120,10 @@ type handlers struct {
 	// Reminders
 	reminders *notifyService.ReminderScheduler
 
+	// Expired refresh-token sweep. Independent of a successful rotation, which
+	// is the only other place those rows are deleted.
+	refreshTokens *authRepo.TokenRepository
+
 	// Availability
 	availability *availabilityHandlers.AvailabilityHandler
 	recurrence   *availabilityHandlers.RecurrenceHandler
@@ -298,7 +302,8 @@ func buildHandlers(d *deps) (*handlers, error) {
 			calendarRepository,
 			d.log,
 		),
-		reminders: reminderScheduler,
+		reminders:     reminderScheduler,
+		refreshTokens: tokenRepo,
 
 		availability: availabilityHandlers.NewAvailabilityHandler(availabilitySvc),
 		recurrence:   availabilityHandlers.NewRecurrenceHandler(availabilitySvc),

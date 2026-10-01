@@ -39,9 +39,11 @@ type ForgotPasswordResponse struct {
 // RefreshExpiresAt carries the token's real lifetime to the cookie writer; it is
 // also `json:"-"`, for the same reason.
 type ResetPasswordResponse struct {
-	Message          string        `json:"message"`
-	AccessToken      string        `json:"access_token"`
-	RefreshToken     string        `json:"-"`
-	RefreshExpiresAt time.Time     `json:"-"`
-	User             *UserResponse `json:"user"`
+	Message          string    `json:"message"`
+	AccessToken      string    `json:"access_token"`
+	RefreshToken     string    `json:"-"`
+	RefreshExpiresAt time.Time `json:"-"`
+	// SessionID is the server family of the auto-login cookie, same contract as AuthResponse.
+	SessionID string        `json:"session_id,omitempty"`
+	User      *UserResponse `json:"user"`
 }

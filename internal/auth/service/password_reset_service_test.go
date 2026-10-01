@@ -62,12 +62,12 @@ type resetTokenFixture struct {
 	created *models.RefreshToken
 }
 
-func (f *resetTokenFixture) Create(_ context.Context, token *models.RefreshToken) error {
+func (f *resetTokenFixture) Create(_ context.Context, token *models.RefreshToken, _ int64) error {
 	f.created = token
 	return nil
 }
 
-func (f *resetTokenFixture) DeleteByUserID(context.Context, uuid.UUID) error { return nil }
+func (f *resetTokenFixture) DeleteByUserID(context.Context, uuid.UUID) (int64, error) { return 1, nil }
 
 type resetMailerFixture struct {
 	configured bool
@@ -91,6 +91,10 @@ func (f *resetTokenIssuerFixture) GenerateAccessToken(_, _, _ string) (string, e
 
 func (f *resetTokenIssuerFixture) GenerateRefreshToken(string) (string, time.Time, error) {
 	return "refresh-token", f.refreshExpiresAt, nil
+}
+
+func (f *resetTokenIssuerFixture) IssueRefreshToken(string, string) (string, time.Time, string, error) {
+	return "refresh-token", f.refreshExpiresAt, "family-reset", nil
 }
 
 func newResetServiceFixture(t *testing.T, resetExpiry time.Duration) (*PasswordResetService, *resetUserFixture, *resetMailerFixture) {

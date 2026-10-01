@@ -1189,6 +1189,15 @@ export interface paths {
             'application/json': components['schemas']['httputil.ErrorResponse'];
           };
         };
+        /** @description Infrastructure failure - the presented token may still be valid; retry */
+        500: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['httputil.ErrorResponse'];
+          };
+        };
       };
     };
     delete?: never;
@@ -4885,6 +4894,12 @@ export interface components {
       expires_in?: number;
       /** @description True if 2FA verification is required */
       require_mfa?: boolean;
+      /**
+       * @description SessionID is the server-issued family of the refresh cookie this response
+       *     belongs to. It is stable across rotation and new on every login, so clients
+       *     can converge on the cookie's family instead of a locally guessed nonce.
+       */
+      session_id?: string;
       /** @description Temporary token for 2FA flow (5min expiry) */
       temp_token?: string;
       user?: components['schemas']['models.User'];

@@ -111,7 +111,7 @@ type mockTokenRepository struct {
 	err error
 }
 
-func (m *mockTokenRepository) Create(ctx context.Context, token *models.RefreshToken) error {
+func (m *mockTokenRepository) Create(ctx context.Context, token *models.RefreshToken, _ int64) error {
 	return m.err
 }
 
@@ -130,15 +130,23 @@ func (m *mockTokenRepository) DeleteByHash(ctx context.Context, tokenHash string
 	return m.err
 }
 
-func (m *mockTokenRepository) DeleteByUserID(ctx context.Context, userID uuid.UUID) error {
-	return m.err
+func (m *mockTokenRepository) DeleteByUserID(ctx context.Context, userID uuid.UUID) (int64, error) {
+	return 0, m.err
 }
 
 func (m *mockTokenRepository) Consume(context.Context, string) (bool, error) {
 	return m.err == nil, m.err
 }
 
-func (m *mockTokenRepository) DeleteConsumedBefore(context.Context, uuid.UUID, time.Time) error {
+func (m *mockTokenRepository) CreatePendingMFASession(context.Context, string, time.Time, *models.RefreshToken, int64) (bool, error) {
+	return m.err == nil, m.err
+}
+
+func (m *mockTokenRepository) CommitRotation(context.Context, string, *models.RefreshToken, time.Duration) error {
+	return m.err
+}
+
+func (m *mockTokenRepository) RevokePresentedFamily(context.Context, string) error {
 	return m.err
 }
 

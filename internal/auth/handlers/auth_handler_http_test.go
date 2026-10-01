@@ -595,7 +595,7 @@ func TestRefreshReadsTheCookieOnly(t *testing.T) {
 		r := newRig(t, rigOptions{
 			allowedRegister: true,
 			users:           &mockUserRepository{user: user},
-			tokens:          &mockTokenRepository{err: errors.New("no rows")},
+			tokens:          &mockTokenRepository{err: repository.ErrTokenNotFound},
 		})
 
 		req := post("/api/v1/auth/refresh", "")
@@ -608,6 +608,95 @@ func TestRefreshReadsTheCookieOnly(t *testing.T) {
 			t.Errorf("status = %d, want 401", rec.Code)
 		}
 	})
+}
+
+// errAuditDBFailure stands in for a transient infrastructure fault (a dropped
+// connection, an unreachable database) injected into a refresh-stage repository.
+var errAuditDBFailure = errors.New("database connection lost")
+
+// auditFailingRotation is a token repository whose rotation fails for infrastructure
+// reasons rather than because the presented token was rejected.
+type auditFailingRotation struct {
+	mockTokenRepository
+}
+
+func (*auditFailingRotation) CommitRotation(context.Context, string, *models.RefreshToken, time.Duration) error {
+	return errAuditDBFailure
+}
+
+// TestRefreshInfrastructureFailureIsServerFailure pins the classification an infra
+// outage must NOT get: a refresh that cannot reach the database is not the same as a
+// token that was refused. Before this test the service collapsed both a partial
+// rotation and a user lookup to the rejection sentinels, the handler answered 401, and
+// the browser signed the user out over a transient fault — discarding a (probably
+// still valid) session and hiding the real cause. The service must preserve the
+// underlying error and the handler must answer 5xx, not 401.
+func TestRefreshInfrastructureFailureIsServerFailure(t *testing.T) {
+	for _, stage := range []string{"rotation", "user_lookup"} {
+		t.Run(stage, func(t *testing.T) {
+			user := existingUser(t, "Correct-Horse-9")
+			users := &mockUserRepository{user: user}
+			opts := rigOptions{users: users}
+			if stage == "rotation" {
+				opts.tokens = &auditFailingRotation{}
+			}
+			r := newRig(t, opts)
+
+			token, _, err := r.manager.GenerateRefreshToken(user.ID.String())
+			if err != nil {
+				t.Fatalf("GenerateRefreshToken: %v", err)
+			}
+			if stage == "user_lookup" {
+				users.err = errAuditDBFailure
+			}
+
+			// The service must keep the original failure reachable through errors.Is,
+			// not fold it into a rejection sentinel that loses the cause.
+			if _, err := r.registry.RefreshToken(context.Background(), token); !errors.Is(err, errAuditDBFailure) {
+				t.Errorf("underlying failure lost: got %v", err)
+			}
+
+			req := post("/api/v1/auth/refresh", "")
+			req.AddCookie(&http.Cookie{Name: "refresh_token", Value: token})
+			rec := httptest.NewRecorder()
+			r.handler.Refresh(rec, req)
+
+			if rec.Code != http.StatusInternalServerError {
+				t.Errorf("HTTP %d, want 500; body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestRefreshRejectionStillAnswers401 guards the other side of the classification: a
+// *genuine* rejection (a token the store does not know) keeps answering 401 so the
+// browser signs out — infrastructure failures and rejections must not blur together in
+// either direction.
+func TestRefreshRejectionStillAnswers401(t *testing.T) {
+	user := existingUser(t, "Correct-Horse-9")
+	r := newRig(t, rigOptions{
+		allowedRegister: true,
+		users:           &mockUserRepository{user: user},
+		tokens:          &mockTokenRepository{err: repository.ErrTokenNotFound},
+	})
+
+	token, _, err := r.manager.GenerateRefreshToken(user.ID.String())
+	if err != nil {
+		t.Fatalf("GenerateRefreshToken: %v", err)
+	}
+
+	if _, err := r.registry.RefreshToken(context.Background(), token); !errors.Is(err, service.ErrInvalidToken) {
+		t.Errorf("service error = %v, want %v", err, service.ErrInvalidToken)
+	}
+
+	req := post("/api/v1/auth/refresh", "")
+	req.AddCookie(&http.Cookie{Name: "refresh_token", Value: token})
+	rec := httptest.NewRecorder()
+	r.handler.Refresh(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("HTTP %d, want 401; body=%s", rec.Code, rec.Body.String())
+	}
 }
 
 func TestLogoutClearsTheCookie(t *testing.T) {

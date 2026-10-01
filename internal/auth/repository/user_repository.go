@@ -78,7 +78,7 @@ func (r *UserRepository) GetByID(ctx context.Context, id uuid.UUID) (*models.Use
 		       email_verified, verification_token, verification_token_expires_at,
 		       password_reset_token, password_reset_token_expires_at,
 		       magic_link_token, magic_link_token_expires_at,
-		       created_at, updated_at
+		       security_generation, created_at, updated_at
 		FROM users
 		WHERE id = $1`
 
@@ -98,6 +98,7 @@ func (r *UserRepository) GetByID(ctx context.Context, id uuid.UUID) (*models.Use
 		&user.PasswordResetTokenExpiresAt,
 		&user.MagicLinkToken,
 		&user.MagicLinkTokenExpiresAt,
+		&user.SecurityGeneration,
 		&user.CreatedAt,
 		&user.UpdatedAt,
 	)
@@ -119,7 +120,7 @@ func (r *UserRepository) GetByEmail(ctx context.Context, email string) (*models.
 		       email_verified, verification_token, verification_token_expires_at,
 		       password_reset_token, password_reset_token_expires_at,
 		       magic_link_token, magic_link_token_expires_at,
-		       created_at, updated_at
+		       security_generation, created_at, updated_at
 		FROM users
 		WHERE email = $1`
 
@@ -139,6 +140,7 @@ func (r *UserRepository) GetByEmail(ctx context.Context, email string) (*models.
 		&user.PasswordResetTokenExpiresAt,
 		&user.MagicLinkToken,
 		&user.MagicLinkTokenExpiresAt,
+		&user.SecurityGeneration,
 		&user.CreatedAt,
 		&user.UpdatedAt,
 	)
@@ -319,7 +321,7 @@ func (r *UserRepository) List(ctx context.Context) ([]*models.User, error) {
 		       email_verified, verification_token, verification_token_expires_at,
 		       password_reset_token, password_reset_token_expires_at,
 		       magic_link_token, magic_link_token_expires_at,
-		       created_at, updated_at
+		       security_generation, created_at, updated_at
 		FROM users
 		ORDER BY created_at DESC`
 
@@ -347,6 +349,7 @@ func (r *UserRepository) List(ctx context.Context) ([]*models.User, error) {
 			&user.PasswordResetTokenExpiresAt,
 			&user.MagicLinkToken,
 			&user.MagicLinkTokenExpiresAt,
+			&user.SecurityGeneration,
 			&user.CreatedAt,
 			&user.UpdatedAt,
 		)
@@ -560,7 +563,7 @@ func (r *UserRepository) GetByVerificationToken(ctx context.Context, token strin
 		       email_verified, verification_token, verification_token_expires_at,
 		       password_reset_token, password_reset_token_expires_at,
 		       magic_link_token, magic_link_token_expires_at,
-		       created_at, updated_at
+		       security_generation, created_at, updated_at
 		FROM users
 		WHERE verification_token = $1
 		  AND verification_token_expires_at > NOW()`
@@ -581,6 +584,7 @@ func (r *UserRepository) GetByVerificationToken(ctx context.Context, token strin
 		&user.PasswordResetTokenExpiresAt,
 		&user.MagicLinkToken,
 		&user.MagicLinkTokenExpiresAt,
+		&user.SecurityGeneration,
 		&user.CreatedAt,
 		&user.UpdatedAt,
 	)
@@ -645,7 +649,7 @@ func (r *UserRepository) GetByPasswordResetToken(ctx context.Context, token stri
 		SELECT id, email, password_hash, display_name, role, locale, timezone,
 		       email_verified, verification_token, verification_token_expires_at,
 		       password_reset_token, password_reset_token_expires_at,
-		       created_at, updated_at
+		       security_generation, created_at, updated_at
 		FROM users
 		WHERE password_reset_token = $1
 		  AND password_reset_token_expires_at > NOW()`
@@ -664,6 +668,7 @@ func (r *UserRepository) GetByPasswordResetToken(ctx context.Context, token stri
 		&user.VerificationTokenExpiresAt,
 		&user.PasswordResetToken,
 		&user.PasswordResetTokenExpiresAt,
+		&user.SecurityGeneration,
 		&user.CreatedAt,
 		&user.UpdatedAt,
 	)
@@ -707,7 +712,7 @@ func (r *UserRepository) GetByEmailVerified(ctx context.Context, email string) (
 		       email_verified, verification_token, verification_token_expires_at,
 		       password_reset_token, password_reset_token_expires_at,
 		       magic_link_token, magic_link_token_expires_at,
-		       created_at, updated_at
+		       security_generation, created_at, updated_at
 		FROM users
 		WHERE email = $1 AND email_verified = true`
 
@@ -727,6 +732,7 @@ func (r *UserRepository) GetByEmailVerified(ctx context.Context, email string) (
 		&user.PasswordResetTokenExpiresAt,
 		&user.MagicLinkToken,
 		&user.MagicLinkTokenExpiresAt,
+		&user.SecurityGeneration,
 		&user.CreatedAt,
 		&user.UpdatedAt,
 	)
@@ -770,7 +776,7 @@ func (r *UserRepository) GetByMagicLinkToken(ctx context.Context, token string) 
 		       email_verified, verification_token, verification_token_expires_at,
 		       password_reset_token, password_reset_token_expires_at,
 		       magic_link_token, magic_link_token_expires_at,
-		       created_at, updated_at
+		       security_generation, created_at, updated_at
 		FROM users
 		WHERE magic_link_token = $1
 		  AND magic_link_token_expires_at > NOW()`
@@ -791,6 +797,7 @@ func (r *UserRepository) GetByMagicLinkToken(ctx context.Context, token string) 
 		&user.PasswordResetTokenExpiresAt,
 		&user.MagicLinkToken,
 		&user.MagicLinkTokenExpiresAt,
+		&user.SecurityGeneration,
 		&user.CreatedAt,
 		&user.UpdatedAt,
 	)
