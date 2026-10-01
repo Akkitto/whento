@@ -451,7 +451,10 @@ async function handleSubmit() {
         // that truthfully instead of saving an "enabled" flag that says it can.
         const config = { ...notifyConfig.value };
         if (!smtpConfigured.value) {
-          config.channels = { ...config.channels, email: { ...config.channels.email, enabled: false } };
+          config.channels = {
+            ...config.channels,
+            email: { ...config.channels.email, enabled: false },
+          };
         }
         await updateNotifyConfig(calendar.id, config);
       } catch {

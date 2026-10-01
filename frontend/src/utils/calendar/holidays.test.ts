@@ -6,7 +6,13 @@
 
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { inTimezone, SAMPLE_TIMEZONES } from '@/test/timezone';
-import { clearHolidayCache, getHolidayIndex, holidaysReady, holidaysVersion, resolveCountry } from './holidays';
+import {
+  clearHolidayCache,
+  getHolidayIndex,
+  holidaysReady,
+  holidaysVersion,
+  resolveCountry,
+} from './holidays';
 import { holidaysApi } from '@/api/holidays';
 
 /*
@@ -60,7 +66,10 @@ const ru2026 = [
   { date: '2026-01-06', name: 'New Year Holiday' },
 ];
 
-const byTimezone: Record<string, { country: string; supported: boolean; holidays: { date: string; name: string }[] }> = {
+const byTimezone: Record<
+  string,
+  { country: string; supported: boolean; holidays: { date: string; name: string }[] }
+> = {
   'Europe/Paris': { country: 'FR', supported: true, holidays: fr2026 },
   'America/New_York': { country: 'US', supported: true, holidays: us2026 },
   'Europe/Moscow': { country: 'RU', supported: true, holidays: ru2026 },
@@ -72,9 +81,17 @@ vi.mock('@/api/holidays', () => ({
     year: vi.fn((timezone: string, year: number) => {
       const entry = byTimezone[timezone];
       if (!entry || year !== 2026) {
-        return Promise.resolve({ country_code: entry?.country ?? null, supported: entry?.supported ?? false, holidays: [] });
+        return Promise.resolve({
+          country_code: entry?.country ?? null,
+          supported: entry?.supported ?? false,
+          holidays: [],
+        });
       }
-      return Promise.resolve({ country_code: entry.country, supported: true, holidays: entry.holidays });
+      return Promise.resolve({
+        country_code: entry.country,
+        supported: true,
+        holidays: entry.holidays,
+      });
     }),
   },
 }));

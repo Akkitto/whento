@@ -67,24 +67,24 @@ export default defineConfig(({ mode: _mode }) => {
            * containing `@vue/shared`, and `vendor-vue` was never emitted at all.
            *
            * So the groups below only draw lines that actually survive a build, and
-            * each one is named for exactly what it ends up holding (verified against
-            * `dist/`, see the chunk list in the build output):
-            *
-            *   vendor-framework      vue, vue-router, vue-i18n, pinia and their scoped
-            *                         packages. All four load on every page, so Rolldown
-            *                         would merge them whatever we called them; one
-            *                         honestly named chunk beats four fictional ones.
-            *   vendor-date           the timezone tables.
-            *
-            * axios and @vueuse are deliberately absent: axios is always loaded and
-            * folds into the entry, and @vueuse is only reachable from ParticipantView,
-            * so it already travels with it. Declaring groups for them would just
-            * recreate the dead branches this replaces.
-            *
-            * There is no holiday chunk any more: the 1.4 MB `date-holidays` dataset
-            * was dropped in favour of the backend's offline holidays endpoint, so
-            * holiday data is fetched per year instead of shipped in the bundle.
-            */
+           * each one is named for exactly what it ends up holding (verified against
+           * `dist/`, see the chunk list in the build output):
+           *
+           *   vendor-framework      vue, vue-router, vue-i18n, pinia and their scoped
+           *                         packages. All four load on every page, so Rolldown
+           *                         would merge them whatever we called them; one
+           *                         honestly named chunk beats four fictional ones.
+           *   vendor-date           the timezone tables.
+           *
+           * axios and @vueuse are deliberately absent: axios is always loaded and
+           * folds into the entry, and @vueuse is only reachable from ParticipantView,
+           * so it already travels with it. Declaring groups for them would just
+           * recreate the dead branches this replaces.
+           *
+           * There is no holiday chunk any more: the 1.4 MB `date-holidays` dataset
+           * was dropped in favour of the backend's offline holidays endpoint, so
+           * holiday data is fetched per year instead of shipped in the bundle.
+           */
           codeSplitting: {
             groups: [
               {
