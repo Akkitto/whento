@@ -55,11 +55,11 @@ Requirements:
 
 | Tool | Version | Why pinned |
 | --- | --- | --- |
-| Go | 1.26 | `go.mod`, CI, every Dockerfile |
+| Go | 1.27 (`go.mod` declares a 1.26 minimum) | CI and every Dockerfile must agree; `cmd/dockerfiles_test.go` fails when they do not |
 | Node | 24 (LTS) | CI, Dockerfiles, Dependabot ignores majors past it |
 | Docker + Compose | — | Postgres and Redis for development |
 | `goimports` | **v0.48.0** | Output differs between releases; a mismatch fails `make format-check-go` |
-| `golangci-lint` | v2.12.2 | Findings differ between releases |
+| `golangci-lint` | v2.14.0 | Findings differ between releases |
 | `swag` | v1.16.6 | Generates `docs/swagger/` |
 | `migrate` | v4.19.1 | Must match what the Dockerfiles install |
 
@@ -69,7 +69,7 @@ them.
 
 ```bash
 go install golang.org/x/tools/cmd/goimports@v0.48.0
-go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
 go install github.com/swaggo/swag/cmd/swag@v1.16.6
 go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@v4.19.1
 ```
