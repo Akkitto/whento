@@ -64,7 +64,7 @@
           </h4>
           <div class="space-y-4">
             <!-- Email -->
-            <div v-if="smtpConfigured">
+            <div v-if="emailOptionVisible">
               <label for="channel-email" class="flex items-center">
                 <input
                   id="channel-email"
@@ -78,10 +78,22 @@
               </label>
             </div>
             <div
-              v-else
+              v-else-if="smtpProbe === 'unavailable'"
               class="rounded-md bg-gray-50 p-3 text-sm text-gray-600 dark:bg-gray-800 dark:text-gray-400"
             >
               {{ t('notifications.smtpNotConfigured') }}
+            </div>
+
+            <!-- A failed probe is a retryable warning, never a reason to destroy
+                 the owner's saved email.enabled setting. -->
+            <div
+              v-if="smtpProbe === 'error'"
+              class="flex items-center justify-between rounded-md bg-orange-50 p-3 text-sm text-orange-700 dark:bg-orange-900/20 dark:text-orange-300"
+            >
+              <span>{{ t('notifications.smtpProbeFailed') }}</span>
+              <button type="button" class="btn btn-ghost ml-3" @click="$emit('retry-smtp-probe')">
+                {{ t('common.retry') }}
+              </button>
             </div>
 
             <!-- Discord -->
@@ -249,18 +261,20 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { getDefaultNotifyConfig, type NotifyConfig } from '@/api/notify';
+import type { SmtpProbeState } from '@/utils/smtpProbe';
 import CollapsibleSection from '@/components/CollapsibleSection.vue';
 
 const props = withDefaults(
   defineProps<{
     modelValue: NotifyConfig;
-    smtpConfigured?: boolean;
+    smtpProbe?: SmtpProbeState;
     showSaveButton?: boolean;
   }>(),
   {
+    smtpProbe: 'unknown',
     showSaveButton: true,
   }
 );
@@ -268,11 +282,17 @@ const props = withDefaults(
 const emit = defineEmits<{
   'update:modelValue': [value: NotifyConfig];
   save: [value: NotifyConfig];
+  'retry-smtp-probe': [];
 }>();
 
 const { t } = useI18n();
 const localConfig = ref<NotifyConfig>(getDefaultNotifyConfig());
 const saving = ref(false);
+
+// The email channel is offered whenever SMTP may exist; only a confirmed
+// 'unavailable' hides it (and makes persistence force it off). While the probe is
+// in flight or failed, the checkbox keeps reflecting the saved value.
+const emailOptionVisible = computed(() => props.smtpProbe !== 'unavailable');
 
 // Initialize local config from props - only on mount and when prop changes externally
 let isInternalUpdate = false;
