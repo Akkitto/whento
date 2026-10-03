@@ -1,4 +1,4 @@
-.PHONY: require-selfhosted-image dev dev-fullstack dev-backend dev-frontend dev-db dev-app test test-root test-pkg test-coverage build clean migrate-up migrate-down migrate-reset migrate-status sync docker-build docker-build-versioned docker-build-multiarch docker-test-build docker-up docker-down docker-logs docker-ps swagger swagger-generate swagger-clean types types-check docs-serve docs-validate keys help hooks format format-go format-frontend format-check format-check-go format-check-frontend lint lint-go
+.PHONY: require-selfhosted-image dev dev-fullstack dev-backend dev-frontend dev-db dev-app test test-root test-pkg test-coverage build clean migrate-up migrate-down migrate-reset migrate-status sync docker-build docker-build-versioned docker-build-multiarch docker-test-build docker-up docker-down docker-logs docker-ps swagger swagger-generate swagger-generate-if-missing swagger-clean types types-check docs-serve docs-validate keys help hooks format format-go format-frontend format-check format-check-go format-check-frontend lint lint-go
 
 # BUILD_TYPE can be 'cloud' or 'selfhosted' (default: selfhosted)
 BUILD_TYPE ?= selfhosted
@@ -116,7 +116,11 @@ dev-frontend:
 # go.work declares two modules, and `./...` only ever expands within the module it is
 # run from. Testing pkg/ therefore needs its own invocation from inside pkg/ — without
 # it, jwt, participanttoken, middleware, validator and httputil are never tested.
-test: test-root test-pkg
+# The two prerequisites are what a clean checkout is missing: the root module embeds
+# web/dist (frontend placeholder suffices) and imports the generated docs/swagger, and
+# without either, `go test ./...` will not even compile. CI manufactures both as
+# uploaded artifacts; the local command has to make its own.
+test: ensure-dist-placeholder swagger-generate-if-missing test-root test-pkg
 
 test-root:
 	@echo "Running root module tests ($(BUILD_TYPE) mode)..."
@@ -378,6 +382,19 @@ swagger-generate:
 	@echo "  - docs/swagger/swagger.json"
 	@echo "  - docs/swagger/swagger.yaml"
 	@echo "  - docs/swagger/docs.go"
+
+# docs/swagger is generated from the annotations and gitignored, so a fresh
+# checkout has none of it — yet cmd/main.go imports it and the root module will
+# not compile (and therefore not test) without it. CI uploads the generated
+# directory as an artifact; the local test target regenerates it only when it is
+# absent, so a module that is already present is left untouched instead of being
+# rewritten on every test run.
+swagger-generate-if-missing:
+	@if [ ! -f docs/swagger/docs.go ]; then \
+		$(MAKE) swagger-generate; \
+	else \
+		echo "✓ Swagger docs already present (docs/swagger/docs.go)"; \
+	fi
 
 swagger-clean:
 	@echo "Cleaning generated Swagger files..."

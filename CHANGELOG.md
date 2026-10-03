@@ -40,7 +40,21 @@ line per release rather than listed individually.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- `validate-compose` CI check: every supported Compose file (`docker-compose.yml`,
+  `docker-compose.dev.yml`, `.devcontainer/docker-compose.yml`) must parse and
+  interpolate with `docker compose config -q`.
+
+### Changed
+
+- Production Compose PID limits now agree between the service-level `pids_limit`
+  and `deploy.resources.limits.pids` (app 256, postgres 512, redis 128). Compose
+  2.20+ refuses a top-level `pids_limit` that disagrees with the deploy-resource
+  spelling, so a stack that set both used to fail at `docker compose up`.
+- `make test` now primes the two artifacts a clean checkout is missing (`web/dist`
+  placeholder and generated Swagger docs) before running the root and shared-module
+  Go suites.
 
 ---
 
