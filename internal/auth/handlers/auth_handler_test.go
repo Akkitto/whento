@@ -20,11 +20,19 @@ import (
 type mockUserRepository struct {
 	user  *models.User
 	users []*models.User
+	// count mirrors the SQL's emptiness check that DetermineRoleAtomically is
+	// built on: an empty table (0) makes the next registration the bootstrap
+	// admin, any other count makes it an ordinary user.
 	count int
 	err   error
 	// createErr is separate from err so a test can fail the insert without also
-	// failing the count that decides whether the account is the bootstrap admin.
+	// failing DetermineRoleAtomically's count that decides whether the account
+	// is the administrator.
 	createErr error
+	// roleErr is separate from err so a test can make the role change refuse
+	// (e.g. the last-admin invariant) without breaking the existence check that
+	// the handler performs first.
+	roleErr error
 }
 
 func (m *mockUserRepository) Create(ctx context.Context, user *models.User) error {
@@ -61,12 +69,21 @@ func (m *mockUserRepository) Update(ctx context.Context, user *models.User) erro
 	return m.err
 }
 
-func (m *mockUserRepository) Delete(ctx context.Context, id uuid.UUID) error {
-	return m.err
+func (m *mockUserRepository) UpdateProfile(
+	ctx context.Context,
+	userID uuid.UUID,
+	displayName *string,
+	locale *string,
+	timezone *string,
+) (*models.User, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	return m.user, nil
 }
 
-func (m *mockUserRepository) Count(ctx context.Context) (int, error) {
-	return m.count, m.err
+func (m *mockUserRepository) Delete(ctx context.Context, id uuid.UUID) error {
+	return m.err
 }
 
 func (m *mockUserRepository) List(ctx context.Context) ([]*models.User, error) {
@@ -77,6 +94,9 @@ func (m *mockUserRepository) List(ctx context.Context) ([]*models.User, error) {
 }
 
 func (m *mockUserRepository) UpdateRole(ctx context.Context, userID uuid.UUID, role string) error {
+	if m.roleErr != nil {
+		return m.roleErr
+	}
 	return m.err
 }
 
@@ -84,22 +104,22 @@ func (m *mockUserRepository) UpdatePassword(ctx context.Context, userID uuid.UUI
 	return m.err
 }
 
-func (m *mockUserRepository) DetermineRoleAtomically(ctx context.Context) (string, error) {
-	count, err := m.Count(ctx)
-	if err != nil {
-		return "", err
+// DetermineRoleAtomically reports the first-user decision. The mock's count is
+// the emptiness check: on an empty table (count 0) the next registration is the
+// bootstrap admin and bypasses the email allow-list; once the instance holds a
+// user, every later registration is an ordinary user.
+func (m *mockUserRepository) DetermineRoleAtomically(context.Context) (string, error) {
+	if m.count == 0 {
+		return models.RoleAdmin, nil
 	}
-	if count == 0 {
-		return "admin", nil
-	}
-	return "user", nil
+	return models.RoleUser, nil
 }
 
 type mockTokenRepository struct {
 	err error
 }
 
-func (m *mockTokenRepository) Create(ctx context.Context, token *models.RefreshToken) error {
+func (m *mockTokenRepository) Create(ctx context.Context, token *models.RefreshToken, _ int64) error {
 	return m.err
 }
 
@@ -118,15 +138,23 @@ func (m *mockTokenRepository) DeleteByHash(ctx context.Context, tokenHash string
 	return m.err
 }
 
-func (m *mockTokenRepository) DeleteByUserID(ctx context.Context, userID uuid.UUID) error {
-	return m.err
+func (m *mockTokenRepository) DeleteByUserID(ctx context.Context, userID uuid.UUID) (int64, error) {
+	return 0, m.err
 }
 
 func (m *mockTokenRepository) Consume(context.Context, string) (bool, error) {
 	return m.err == nil, m.err
 }
 
-func (m *mockTokenRepository) DeleteConsumedBefore(context.Context, uuid.UUID, time.Time) error {
+func (m *mockTokenRepository) CreatePendingMFASession(context.Context, string, time.Time, *models.RefreshToken, int64) (bool, error) {
+	return m.err == nil, m.err
+}
+
+func (m *mockTokenRepository) CommitRotation(context.Context, string, *models.RefreshToken, time.Duration) error {
+	return m.err
+}
+
+func (m *mockTokenRepository) RevokePresentedFamily(context.Context, string) error {
 	return m.err
 }
 

@@ -11,6 +11,7 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"log/slog"
@@ -20,7 +21,6 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/whento/pkg/email"
-	"github.com/whento/pkg/jwt"
 
 	// Aliased: the constructor below takes a *slog.Logger named `logger`, which
 	// would otherwise shadow the package.
@@ -28,6 +28,7 @@ import (
 	"github.com/whento/whento/internal/auth/models"
 	"github.com/whento/whento/internal/auth/repository"
 	"github.com/whento/whento/internal/config"
+	mfaRepo "github.com/whento/whento/internal/mfa/repository"
 )
 
 //go:embed templates/password_reset.html
@@ -37,16 +38,51 @@ var passwordResetTemplate string
 var passwordResetTranslationsJSON string
 
 const (
-	passwordResetTokenExpiry = 1 * time.Hour
-	resetTokenLength         = 32 // bytes (64 hex chars)
+	resetTokenLength = 32 // bytes (64 hex chars)
 )
+
+// The seams below are what the password-reset flow needs of its collaborators.
+// Declared here rather than taking concrete repositories so the service can be
+// exercised without a database or an SMTP server. The repository types satisfy
+// them structurally, so no call site changes.
+
+// PasswordResetUserStore is the slice of the user repository this service uses.
+type PasswordResetUserStore interface {
+	GetByEmail(ctx context.Context, email string) (*models.User, error)
+	SetPasswordResetToken(ctx context.Context, userID uuid.UUID, token string, expiresAt time.Time) error
+	// ConsumePasswordResetToken atomically claims the still-valid reset proof and
+	// applies the new password in one transaction. It reports ErrUserNotFound when
+	// the token is absent or expired.
+	ConsumePasswordResetToken(ctx context.Context, token string, newPasswordHash string) (*models.User, error)
+}
+
+// PasswordResetTokenStore stores the fresh auto-login pair after a reset.
+type PasswordResetTokenStore interface {
+	Create(ctx context.Context, token *models.RefreshToken, securityGeneration int64) error
+}
+
+// PasswordResetMailer sends the reset email and reports whether one can be sent.
+type PasswordResetMailer interface {
+	IsConfigured() bool
+	Send(msg email.Email) error
+}
+
+// PasswordResetTokenIssuer mints the auto-login token pair after a reset, as
+// well as the pending-MFA token an MFA-protected account gets instead.
+type PasswordResetTokenIssuer interface {
+	GenerateAccessToken(userID, email, role string) (string, error)
+	GenerateRefreshToken(userID string) (string, time.Time, error)
+	IssueRefreshToken(userID, familyID string) (string, time.Time, string, error)
+	GenerateCustomToken(claims map[string]interface{}) (string, error)
+}
 
 // PasswordResetService handles password reset business logic
 type PasswordResetService struct {
-	userRepo          *repository.UserRepository
-	tokenRepo         *repository.TokenRepository
-	emailService      *email.Service
-	jwtManager        *jwt.Manager
+	userRepo          PasswordResetUserStore
+	tokenRepo         PasswordResetTokenStore
+	mfaRepo           MFARepository
+	emailService      PasswordResetMailer
+	jwtManager        PasswordResetTokenIssuer
 	cfg               *config.Config
 	logger            *slog.Logger
 	bcryptCost        int
@@ -56,10 +92,11 @@ type PasswordResetService struct {
 
 // NewPasswordResetService creates a new password reset service
 func NewPasswordResetService(
-	userRepo *repository.UserRepository,
-	tokenRepo *repository.TokenRepository,
-	emailService *email.Service,
-	jwtManager *jwt.Manager,
+	userRepo PasswordResetUserStore,
+	tokenRepo PasswordResetTokenStore,
+	mfaRepo MFARepository,
+	emailService PasswordResetMailer,
+	jwtManager PasswordResetTokenIssuer,
 	cfg *config.Config,
 	logger *slog.Logger,
 	bcryptCost int,
@@ -79,6 +116,7 @@ func NewPasswordResetService(
 	return &PasswordResetService{
 		userRepo:          userRepo,
 		tokenRepo:         tokenRepo,
+		mfaRepo:           mfaRepo,
 		emailService:      emailService,
 		jwtManager:        jwtManager,
 		cfg:               cfg,
@@ -132,8 +170,10 @@ func (s *PasswordResetService) processPasswordReset(email string) {
 		return
 	}
 
-	// Store token with expiry
-	expiresAt := time.Now().Add(passwordResetTokenExpiry)
+	// Store token with expiry, configured via PASSWORD_RESET_EXPIRY. The expiry
+	// has to be *the* expiry in both places that mention it: stored here for the
+	// validity check, and in the email text the user reads.
+	expiresAt := time.Now().Add(s.cfg.Email.PasswordResetExpiry)
 	if err := s.userRepo.SetPasswordResetToken(ctx, user.ID, token, expiresAt); err != nil {
 		s.logger.Error("failed to store reset token",
 			"user_id", user.ID,
@@ -170,48 +210,59 @@ func (s *PasswordResetService) processPasswordReset(email string) {
 	}
 }
 
-// ResetPassword validates token and updates password, then auto-logs in the user
+// ResetPassword validates the token, applies the new password atomically, and
+// then either auto-logs the user in or, for an MFA-protected account, returns a
+// pending second-factor challenge instead of a session.
 func (s *PasswordResetService) ResetPassword(ctx context.Context, req *models.ResetPasswordRequest) (*models.ResetPasswordResponse, error) {
-	// Validate token and get user
-	user, err := s.userRepo.GetByPasswordResetToken(ctx, req.Token)
-	if err != nil {
-		return nil, fmt.Errorf("invalid or expired reset token")
-	}
-
-	// Hash new password
+	// Hash the new password first (expensive, and outside the proof claim).
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), s.bcryptCost)
 	if err != nil {
 		return nil, fmt.Errorf("failed to hash password: %w", err)
 	}
 
-	// Update password
-	if err := s.userRepo.UpdatePassword(ctx, user.ID, string(hashedPassword)); err != nil {
-		return nil, fmt.Errorf("failed to update password: %w", err)
+	// Claim the proof and apply the new password in one atomic transaction: the
+	// reset token is consumed, the hash written, the security generation advanced
+	// and every refresh token the user holds is deleted together. A spent or
+	// expired proof leaves the account untouched. A claimed-but-unfinished reset
+	// is impossible: either the whole transition committed or none of it did.
+	user, err := s.userRepo.ConsumePasswordResetToken(ctx, req.Token, string(hashedPassword))
+	if err != nil {
+		if errors.Is(err, repository.ErrUserNotFound) {
+			return nil, fmt.Errorf("invalid or expired reset token")
+		}
+		return nil, fmt.Errorf("failed to consume password reset token: %w", err)
 	}
 
-	// Clear reset token
-	if err := s.userRepo.ClearPasswordResetToken(ctx, user.ID); err != nil {
-		s.logger.Error("failed to clear reset token after password update",
-			"user_id", user.ID,
-			"error", err.Error())
-		// Non-fatal - continue with auto-login
+	// The reset itself has landed. An MFA-protected account still has to prove the
+	// second factor before any session is issued; the pending token below is bound
+	// to the NEW security generation, so a stale finalization cannot ride it.
+	mfa, err := s.mfaRepo.GetByUserID(ctx, user.ID)
+	if err != nil && !errors.Is(err, mfaRepo.ErrMFANotFound) {
+		return nil, fmt.Errorf("failed to check MFA status: %w", err)
+	}
+	if mfa != nil && mfa.Enabled {
+		tempToken, err := pendingMFAToken(s.jwtManager, user.ID, user.SecurityGeneration)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate temp token: %w", err)
+		}
+		s.logger.Info("password reset applied; MFA required to complete login",
+			"user_id", user.ID)
+		return &models.ResetPasswordResponse{
+			Message:    "Password updated. Complete the login with your second factor.",
+			User:       toUserResponse(user),
+			RequireMFA: true,
+			TempToken:  tempToken,
+		}, nil
 	}
 
-	// Invalidate all existing refresh tokens (force re-login on other devices)
-	if err := s.tokenRepo.DeleteByUserID(ctx, user.ID); err != nil {
-		s.logger.Error("failed to revoke existing tokens after password reset",
-			"user_id", user.ID,
-			"error", err.Error())
-		// Non-fatal - continue
-	}
-
-	// Generate new tokens for auto-login
+	// No MFA: auto-login with a fresh session presenting the generation the
+	// atomic claim advanced.
 	accessToken, err := s.jwtManager.GenerateAccessToken(user.ID.String(), user.Email, user.Role)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate access token: %w", err)
 	}
 
-	refreshToken, expiresAt, err := s.jwtManager.GenerateRefreshToken(user.ID.String())
+	refreshToken, expiresAt, familyID, err := s.jwtManager.IssueRefreshToken(user.ID.String(), "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate refresh token: %w", err)
 	}
@@ -221,10 +272,11 @@ func (s *PasswordResetService) ResetPassword(ctx context.Context, req *models.Re
 		UserID:    user.ID,
 		TokenHash: repository.HashToken(refreshToken),
 		ExpiresAt: expiresAt,
+		FamilyID:  familyID,
 	}
 	storedToken.ID = uuid.New()
 
-	if err := s.tokenRepo.Create(ctx, storedToken); err != nil {
+	if err := s.tokenRepo.Create(ctx, storedToken, user.SecurityGeneration); err != nil {
 		return nil, fmt.Errorf("failed to store refresh token: %w", err)
 	}
 
@@ -232,10 +284,12 @@ func (s *PasswordResetService) ResetPassword(ctx context.Context, req *models.Re
 		"user_id", user.ID)
 
 	return &models.ResetPasswordResponse{
-		Message:      "Password reset successful",
-		AccessToken:  accessToken,
-		RefreshToken: refreshToken,
-		User:         toUserResponse(user),
+		Message:          "Password reset successful",
+		AccessToken:      accessToken,
+		RefreshToken:     refreshToken,
+		RefreshExpiresAt: expiresAt,
+		SessionID:        familyID,
+		User:             toUserResponse(user),
 	}, nil
 }
 
@@ -257,7 +311,7 @@ func (s *PasswordResetService) sendPasswordResetEmail(user *models.User, resetUR
 	}
 
 	// Prepare template data
-	expiryDuration := passwordResetTokenExpiry.String()
+	expiryDuration := s.cfg.Email.PasswordResetExpiry.String()
 	data := map[string]any{
 		"Subject":        trans["subject"],
 		"Greeting":       email.ReplaceVar(trans["greeting"], "DisplayName", user.DisplayName),

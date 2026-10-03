@@ -45,3 +45,14 @@ type UpdateRoleRequest struct {
 type MagicLinkRequest struct {
 	Email string `json:"email" validate:"required,email"`
 }
+
+// MagicLinkVerifyRequest is the JSON body of the POST /magic-link/verify
+// endpoint.
+//
+// The magic link moved from a GET that logged the visitor straight in (which is
+// how an attack-site link switched an already-authenticated account) to a POST
+// the SPA submits only after the visitor confirms the link. The token is the
+// same 64-hex value the email carried.
+type MagicLinkVerifyRequest struct {
+	Token string `json:"token" validate:"required,len=64"`
+}

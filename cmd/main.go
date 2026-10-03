@@ -309,6 +309,10 @@ func run() error {
 	baseCtx, baseCancel := context.WithCancel(context.Background())
 	defer baseCancel()
 
+	if h.refreshTokens != nil {
+		go sweepExpiredRefreshTokens(baseCtx, h.refreshTokens, log)
+	}
+
 	// Create server
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
@@ -385,6 +389,39 @@ func run() error {
 // exposition path, and pkg/logger's log-field guard lifts that field name for
 // cmd/main.go by name. Moving this function moves it out from under the
 // exception and fails that test.
+// sweepExpiredRefreshTokens deletes refresh rows whose JWT has expired.
+// Rotation only cleans the user who just refreshed, so abandoned sessions
+// would otherwise remain forever. The interval is long enough that a sweep
+// is not a load, and short enough that the table cannot grow without bound
+// between process restarts.
+func sweepExpiredRefreshTokens(ctx context.Context, tokens interface {
+	DeleteExpired(context.Context) (int64, error)
+}, log *slog.Logger) {
+	const every = time.Hour
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	sweep := func() {
+		deleted, err := tokens.DeleteExpired(ctx)
+		if err != nil {
+			log.Error("refresh token expiry sweep failed", "error", err)
+			return
+		}
+		if deleted > 0 {
+			log.Info("refresh token expiry sweep", "deleted", deleted)
+		}
+	}
+	sweep()
+	for {
+		select {
+		case <-ctx.Done():
+			log.Info("refresh token expiry sweep stopped")
+			return
+		case <-ticker.C:
+			sweep()
+		}
+	}
+}
+
 func startMetricsServer(cfg *config.Config, log *slog.Logger) func() {
 	if !cfg.MetricsEnabled {
 		return func() {}

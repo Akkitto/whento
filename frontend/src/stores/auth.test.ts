@@ -270,6 +270,20 @@ describe('auth store', () => {
       expect(apiClient.setToken).toHaveBeenCalledWith('fresh', undefined);
     });
 
+    it('does not sign the user in when the reset requires MFA', async () => {
+      authApi.resetPassword.mockResolvedValue({
+        require_mfa: true,
+        temp_token: 'reset-pending',
+      } as never);
+      const store = freshStore();
+
+      const response = await store.resetPassword('reset-token', 'new-password');
+
+      expect(response).toEqual({ require_mfa: true, temp_token: 'reset-pending' });
+      expect(store.user).toBeNull();
+      expect(apiClient.setToken).not.toHaveBeenCalled();
+    });
+
     it('translates a forgotten-password failure', async () => {
       authApi.forgotPassword.mockRejectedValue({ code: 'RATE_LIMITED' });
       const store = freshStore();
