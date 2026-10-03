@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -72,6 +73,11 @@ type deps struct {
 	limiter    *routeLimiter
 	quota      *Services
 
+	// instanceID identifies this process to the reminder-job queue: it is the
+	// value written into reminder_jobs.locked_by so a crash can be distinguished
+	// from a slow delivery, and jobs reclaimed after the lease TTL.
+	instanceID string
+
 	// cacheProbe is nil when no Redis client was created — see run(), where the
 	// distinction between "no cache configured" and "cache down" is made.
 	cacheProbe authHandlers.Probe
@@ -109,6 +115,10 @@ type handlers struct {
 	// Notification
 	notifyConfig     *notifyHandlers.NotifyConfigHandler
 	participantEmail *notifyHandlers.ParticipantEmailHandler
+
+	// Reminder scheduler. Not an HTTP handler: a background job issuer/deliverer
+	// that run() starts and stops with the process.
+	reminders *notifyService.ReminderScheduler
 
 	// Expired refresh-token sweep. Independent of a successful rotation, which
 	// is the only other place those rows are deleted.
@@ -232,6 +242,33 @@ func buildHandlers(d *deps) (*handlers, error) {
 		d.log,
 	)
 
+	// The reminder scheduler is a background job issuer/deliverer, not an
+	// endpoint: it reads the notify_config stored by the handler above and keeps
+	// the reminder promise. The persisted job queue is what makes it reliable;
+	// instanceID marks which process holds which jobs through ClaimDue, and the
+	// per-acquisition claim token is what fences the delivery itself.
+	reminderJobRepo := notifyRepo.NewReminderJobRepository(d.pool)
+	reminderScheduler := notifyService.NewReminderScheduler(
+		calendarRepository,
+		availabilityRepository,
+		participantRepository,
+		userRepo,
+		notificationLogRepo,
+		d.mailer,
+		externalNotifier,
+		reminderJobRepo,
+		d.cfg.AppURL,
+		d.instanceID,
+		notifyService.ReminderTunables{
+			HoursBefore:   time.Duration(d.cfg.Reminders.HoursBefore) * time.Hour,
+			Interval:      d.cfg.Reminders.Interval,
+			CatchUpWindow: d.cfg.Reminders.CatchUpWindow,
+			MaxAttempts:   d.cfg.Reminders.MaxAttempts,
+			RetryBackoff:  d.cfg.Reminders.RetryBackoff,
+		},
+		d.log,
+	)
+
 	// ========== AVAILABILITY SERVICE (depends on the notification service) ==========
 	availabilitySvc := availabilityService.NewAvailabilityService(
 		availabilityRepository,
@@ -269,6 +306,8 @@ func buildHandlers(d *deps) (*handlers, error) {
 			calendarRepository,
 			d.log,
 		),
+
+		reminders: reminderScheduler,
 
 		refreshTokens: tokenRepo,
 

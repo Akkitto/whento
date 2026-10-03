@@ -813,7 +813,8 @@
     "invalidToken": "Le lien de vérification est invalide.",
     "tokenExpired": "Le lien de vérification a expiré. Veuillez en demander un nouveau.",
     "verificationError": "Une erreur s'est produite lors de la vérification. Veuillez réessayer.",
-    "saveError": "Échec de l'enregistrement des paramètres de notification"
+    "saveError": "Échec de l'enregistrement des paramètres de notification",
+    "smtpProbeFailed": "Impossible de vérifier la disponibilité de l'e-mail. Réessayez pour vérifier à nouveau."
   },
   "unifiedFeed": {
     "title": "Flux ICS unifié",
