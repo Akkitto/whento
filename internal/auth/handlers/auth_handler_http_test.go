@@ -28,6 +28,7 @@ import (
 
 	"github.com/whento/pkg/cache"
 	"github.com/whento/pkg/email"
+	"github.com/whento/pkg/httputil"
 	"github.com/whento/pkg/jwt"
 	"github.com/whento/pkg/middleware"
 	"github.com/whento/whento/internal/auth/handlers"
@@ -323,10 +324,11 @@ func TestRegisterValidatesTheBody(t *testing.T) {
 func TestRegistrationFailuresAreIndistinguishable(t *testing.T) {
 	body := `{"email":"ada@example.test","password":"Correct-Horse-9","display_name":"Ada"}`
 
-	// count: 1 matters. Through DetermineRoleAtomically the first user to register
-	// becomes admin and bypasses both restrictions by design, so with a count of
-	// zero neither failure would occur. A non-zero count puts these registrations
-	// on the ordinary allow-list gate, which is exactly the path under test.
+	// count: 1 matters. A registration only reaches the ordinary gate (allow-list,
+	// duplicate check) once the instance has been bootstrapped — see
+	// TestRegistrationRequiresBootstrapOnAFreshInstance — so with a count of zero
+	// the registration would be refused as bootstrap-required and neither failure
+	// below would occur.
 	taken := newRig(t, rigOptions{
 		allowedRegister: true,
 		users:           &mockUserRepository{count: 1, createErr: repository.ErrUserAlreadyExists},
@@ -375,6 +377,47 @@ func TestRegistrationCanBeDisabled(t *testing.T) {
 	// property of the address, so there is nothing to enumerate.
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("status = %d, want 403", rec.Code)
+	}
+}
+
+// TestRegistrationRequiresBootstrapOnAFreshInstance pins the divergence: an
+// instance that has never had a first user refuses every ordinary registration
+// with 403 BOOTSTRAP_REQUIRED, no matter what ALLOWED_REGISTER says. The first
+// (administrator) account exists only through POST /api/v1/auth/bootstrap and
+// its boot key; registration is not a bootstrap path.
+func TestRegistrationRequiresBootstrapOnAFreshInstance(t *testing.T) {
+	for _, allowed := range []bool{true, false} {
+		r := newRig(t, rigOptions{allowedRegister: allowed, users: &mockUserRepository{count: 0}})
+
+		rec := httptest.NewRecorder()
+		r.handler.Register(rec, post("/api/v1/auth/register",
+			`{"email":"ada@example.test","password":"Correct-Horse-9","display_name":"Ada"}`))
+
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("allowedRegister=%v: status = %d, want 403 (%q)", allowed, rec.Code, rec.Body.String())
+		}
+		body := decode(t, rec)
+		if body.Error == nil || body.Error.Code != httputil.ErrCodeBootstrapRequired {
+			t.Fatalf("allowedRegister=%v: error code = %+v, want %q", allowed, body.Error, httputil.ErrCodeBootstrapRequired)
+		}
+	}
+}
+
+// TestRegistrationSurfacesAnUnreadableMarkerAs503 pins the other divergence: a
+// failure to read the durable first-user marker must surface as a retryable 503,
+// never be mistaken for "no users" (which would reopen the pre-claimed slot).
+func TestRegistrationSurfacesAnUnreadableMarkerAs503(t *testing.T) {
+	r := newRig(t, rigOptions{
+		allowedRegister: true,
+		users:           &mockUserRepository{count: 0, firstUserCreatedErr: errors.New("marker read failed")},
+	})
+
+	rec := httptest.NewRecorder()
+	r.handler.Register(rec, post("/api/v1/auth/register",
+		`{"email":"ada@example.test","password":"Correct-Horse-9","display_name":"Ada"}`))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (%q)", rec.Code, rec.Body.String())
 	}
 }
 

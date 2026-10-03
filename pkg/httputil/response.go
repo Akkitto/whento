@@ -98,4 +98,10 @@ const (
 	ErrCodeConflict     = "CONFLICT"
 	ErrCodeValidation   = "VALIDATION_ERROR"
 	ErrCodeRateLimited  = "RATE_LIMITED"
+	// ErrCodeBootstrapRequired is the stable machine-readable code for "the
+	// instance has no first user yet, so the ordinary auth path is closed"; the
+	// client can recognise it and steer the visitor to /bootstrap. Kept as its
+	// own code (rather than reusing ErrCodeForbidden) so a client never has to
+	// guess which 403 means what.
+	ErrCodeBootstrapRequired = "BOOTSTRAP_REQUIRED"
 )

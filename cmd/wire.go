@@ -88,9 +88,15 @@ type handlers struct {
 	// Auth
 	health        *authHandlers.HealthHandler
 	auth          *authHandlers.AuthHandler
+	bootstrap     *authHandlers.BootstrapHandler
 	passwordReset *authHandlers.PasswordResetHandler
 	magicLink     *authHandlers.MagicLinkHandler
 	adminMFA      *authHandlers.AdminMFAHandler
+
+	// Lifecycle services. Sources the HTTP handlers route to but that are not
+	// HTTP handlers themselves; run() drives their startup side (the boot key)
+	// directly instead of through a handler.
+	bootstrapService *authService.BootstrapService
 
 	// Passkey and MFA
 	passkey *passkeyHandlers.PasskeyHandler
@@ -170,6 +176,14 @@ func buildHandlers(d *deps) (*handlers, error) {
 	// ========== AUTH HANDLERS (need the passkey and MFA repositories) ==========
 	authHandler := authHandlers.NewAuthHandler(authSvc, userRepo, d.mailer, d.cfg, d.log, mfaRepository, passkeyRepository)
 
+	// The bootstrap flow owns the one-time first-user slot: the boot key, the
+	// "no users yet" state and the atomic first insert. It issues the session
+	// for the account it creates through authSvc. The service is kept alongside
+	// its handler because run() drives its startup side (materialise and log the
+	// boot key) without going through HTTP.
+	bootstrapService := authService.NewBootstrapService(userRepo, authSvc, d.cfg.BcryptCost, d.cfg, d.log)
+	bootstrapHandler := authHandlers.NewBootstrapHandler(bootstrapService, d.log)
+
 	// ========== CALENDAR MODULE ==========
 	calendarRepository := calendarRepo.NewCalendarRepository(d.pool)
 	participantRepository := calendarRepo.NewParticipantRepository(d.pool)
@@ -231,9 +245,12 @@ func buildHandlers(d *deps) (*handlers, error) {
 	return &handlers{
 		health:        authHandlers.NewHealthHandler(d.pool, d.cacheProbe),
 		auth:          authHandler,
+		bootstrap:     bootstrapHandler,
 		passwordReset: authHandlers.NewPasswordResetHandler(passwordResetSvc),
 		magicLink:     authHandlers.NewMagicLinkHandler(magicLinkSvc, d.mailer, d.log, magicLinkTrustedOrigins(d.cfg)),
 		adminMFA:      authHandlers.NewAdminMFAHandler(mfaSvc, d.log),
+		// Startup side of the flow, kept alongside the handler it belongs with.
+		bootstrapService: bootstrapService,
 
 		passkey: passkeyHandler,
 		mfa:     mfaHandler,

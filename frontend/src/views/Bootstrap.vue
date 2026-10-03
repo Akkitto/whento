@@ -13,16 +13,10 @@
         <div class="mb-8 text-center">
           <img src="/logo.png" :alt="t('common.logoAlt')" class="mx-auto mb-4 h-16 w-16" />
           <h1 class="font-display text-3xl font-bold text-gray-900 dark:text-white">
-            {{ t('auth.register') }}
+            {{ t('auth.bootstrap.title') }}
           </h1>
           <p class="mt-2 text-sm text-gray-600 dark:text-gray-400">
-            {{ t('auth.hasAccount') }}
-            <router-link
-              to="/login"
-              class="font-medium text-primary-600 hover:text-primary-700 dark:text-primary-400"
-            >
-              {{ t('auth.loginButton') }}
-            </router-link>
+            {{ t('auth.bootstrap.description') }}
           </p>
         </div>
 
@@ -36,6 +30,44 @@
 
         <!-- Form -->
         <form class="space-y-6" @submit.prevent="handleSubmit">
+          <!-- Boot key -->
+          <div>
+            <label for="boot_key" class="block">
+              <span class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300">
+                {{ t('auth.bootstrap.bootKeyLabel') }}
+              </span>
+              <input
+                id="boot_key"
+                v-model="form.boot_key"
+                type="password"
+                required
+                autocomplete="off"
+                class="input font-mono"
+                :class="{ 'input-error': errors.boot_key }"
+                :placeholder="t('auth.bootstrap.bootKeyLabel')"
+              />
+            </label>
+            <p v-if="errors.boot_key" class="mt-1 text-sm text-danger-600 dark:text-danger-400">
+              {{ errors.boot_key }}
+            </p>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('auth.bootstrap.bootKeyHelp') }}
+            </p>
+          </div>
+
+          <div class="relative">
+            <div class="absolute inset-0 flex items-center">
+              <div class="w-full border-t border-gray-300 dark:border-gray-600" />
+            </div>
+            <div class="relative flex justify-center text-xs">
+              <span
+                class="bg-white dark:bg-gray-800 px-4 py-1 rounded-full text-gray-500 dark:text-gray-400 font-medium uppercase tracking-wide"
+              >
+                {{ t('auth.bootstrap.needUser') }}
+              </span>
+            </div>
+          </div>
+
           <!-- Display Name -->
           <div>
             <label for="display_name" class="block">
@@ -125,7 +157,7 @@
               </svg>
               {{ t('common.loading') }}
             </span>
-            <span v-else>{{ t('auth.registerButton') }}</span>
+            <span v-else>{{ t('auth.bootstrap.createAccount') }}</span>
           </button>
         </form>
       </div>
@@ -134,11 +166,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive } from 'vue';
+import { computed, reactive, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { useI18n } from 'vue-i18n';
 import { useAuthStore } from '@/stores/auth';
-import type { RegisterRequest } from '@/types';
+import type { BootstrapRequest, ApiError } from '@/types';
 import { translateValidationError, translateErrorMessage } from '@/utils/errorTranslator';
 import { validatePassword } from '@/utils/password';
 
@@ -146,13 +178,15 @@ const router = useRouter();
 const { t, locale } = useI18n();
 const authStore = useAuthStore();
 
-const form = reactive<RegisterRequest>({
+const form = reactive<BootstrapRequest>({
+  boot_key: '',
   display_name: '',
   email: '',
   password: '',
 });
 
 const errors = reactive({
+  boot_key: '',
   display_name: '',
   email: '',
   password: '',
@@ -161,11 +195,32 @@ const errors = reactive({
 const error = ref('');
 const loading = ref(false);
 
+// When the instance is no longer unconfigured — a bootstrap or a racing first
+// registration that this tab has actually *seen* complete — this page has
+// nothing left to do. The router guard owns navigation on capability state: it
+// only redirects away from /bootstrap once a real /auth/status answer says the
+// instance is configured (bootstrapStatusKnown && !bootstrapRequired). Mirroring
+// that exact condition here stops the component from independently bouncing the
+// operator on a *failed* status read, where the defaults (not known, therefore
+// "not required") would otherwise hide the only setup page.
+const alreadyConfigured = computed(
+  () => authStore.bootstrapStatusKnown && !authStore.bootstrapRequired
+);
+if (alreadyConfigured.value) {
+  router.replace('/login');
+}
+
 function validateForm(): boolean {
+  errors.boot_key = '';
   errors.display_name = '';
   errors.email = '';
   errors.password = '';
   let isValid = true;
+
+  if (!form.boot_key) {
+    errors.boot_key = t('errors.required');
+    isValid = false;
+  }
 
   if (!form.display_name || form.display_name.trim().length === 0) {
     errors.display_name = t('errors.required');
@@ -196,6 +251,7 @@ function validateForm(): boolean {
 
 async function handleSubmit() {
   error.value = '';
+  errors.boot_key = '';
   errors.display_name = '';
   errors.email = '';
   errors.password = '';
@@ -207,31 +263,47 @@ async function handleSubmit() {
   loading.value = true;
 
   try {
-    // Include current locale from UI
-    const requestData: RegisterRequest = {
+    const requestData: BootstrapRequest = {
       ...form,
       locale: locale.value as 'fr' | 'en',
     };
-    await authStore.register(requestData);
+    await authStore.bootstrap(requestData);
     router.push('/dashboard');
-  } catch (err: any) {
-    // Handle validation errors from backend
-    if (err.code === 'VALIDATION_ERROR' && err.details) {
-      err.details.forEach((detail: { field: string; message: string }) => {
-        const { key, params } = translateValidationError(detail.field, detail.message);
-        const translatedMessage = t(key, params || {});
+  } catch (err) {
+    const apiError = err as ApiError;
 
-        if (detail.field === 'display_name') {
+    // Validation errors map to their fields.
+    if (apiError.code === 'VALIDATION_ERROR' && apiError.details) {
+      apiError.details.forEach(detail => {
+        const { key, params } = translateValidationError(detail.field ?? '', detail.message ?? '');
+        const translatedMessage = t(key, params || {});
+        const field = detail.field ?? '';
+
+        if (field === 'boot_key') {
+          errors.boot_key = translatedMessage;
+        } else if (field === 'display_name') {
           errors.display_name = translatedMessage;
-        } else if (detail.field === 'email') {
+        } else if (field === 'email') {
           errors.email = translatedMessage;
-        } else if (detail.field === 'password') {
+        } else if (field === 'password') {
           errors.password = translatedMessage;
         }
       });
-    } else {
-      error.value = t(translateErrorMessage(err, { fallback: 'auth.registerError' }));
+      return;
     }
+
+    // A 401 here is a wrong boot key, not "you are not signed in".
+    if (apiError.code === 'UNAUTHORIZED') {
+      error.value = t('auth.bootstrap.invalidKey');
+      return;
+    }
+    if (apiError.code === 'CONFLICT') {
+      error.value = t('auth.bootstrap.alreadyConfigured');
+      authStore.bootstrapRequired = false; // reflected by the guard next nav
+      router.replace('/login');
+      return;
+    }
+    error.value = t(translateErrorMessage(apiError, { fallback: 'auth.bootstrap.invalidKey' }));
   } finally {
     loading.value = false;
   }

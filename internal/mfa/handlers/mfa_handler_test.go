@@ -260,15 +260,12 @@ func (s *stubAuthUserRepo) GetByEmail(context.Context, string) (*authModels.User
 	return s.user, nil
 }
 
-// DetermineRoleAtomically reports the first-user decision the stub believes
-// the instance is in, mirroring the repository's emptiness check. The MFA
-// flows under test never exercise registration, but the stub must still
-// satisfy the AuthService repository interface.
-func (s *stubAuthUserRepo) DetermineRoleAtomically(context.Context) (string, error) {
-	if s.user == nil {
-		return authModels.RoleAdmin, nil
-	}
-	return authModels.RoleUser, nil
+// FirstUserCreated reports whether the stub believes the instance has been
+// bootstrapped; the MFA flows that touch registration never exercise the
+// first-user path, but they must still satisfy the AuthService repository
+// interface.
+func (s *stubAuthUserRepo) FirstUserCreated(context.Context) (bool, error) {
+	return s.user != nil, nil
 }
 func (s *stubAuthUserRepo) Update(context.Context, *authModels.User) error { return nil }
 
@@ -281,7 +278,10 @@ func (s *stubAuthUserRepo) UpdateProfile(
 ) (*authModels.User, error) {
 	return s.user, nil
 }
-func (s *stubAuthUserRepo) Delete(context.Context, uuid.UUID) error                 { return nil }
+func (s *stubAuthUserRepo) Delete(context.Context, uuid.UUID) error { return nil }
+func (s *stubAuthUserRepo) CreateFirstUser(context.Context, *authModels.User) error {
+	return nil
+}
 func (s *stubAuthUserRepo) List(context.Context) ([]*authModels.User, error)        { return nil, nil }
 func (s *stubAuthUserRepo) UpdateRole(context.Context, uuid.UUID, string) error     { return nil }
 func (s *stubAuthUserRepo) UpdatePassword(context.Context, uuid.UUID, string) error { return nil }

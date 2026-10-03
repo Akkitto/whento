@@ -20,19 +20,19 @@ import (
 type mockUserRepository struct {
 	user  *models.User
 	users []*models.User
-	// count mirrors the SQL's emptiness check that DetermineRoleAtomically is
-	// built on: an empty table (0) makes the next registration the bootstrap
-	// admin, any other count makes it an ordinary user.
 	count int
 	err   error
 	// createErr is separate from err so a test can fail the insert without also
-	// failing DetermineRoleAtomically's count that decides whether the account
-	// is the administrator.
+	// failing the count that decides whether the account is the bootstrap admin.
 	createErr error
 	// roleErr is separate from err so a test can make the role change refuse
 	// (e.g. the last-admin invariant) without breaking the existence check that
 	// the handler performs first.
 	roleErr error
+	// firstUserCreatedErr makes the durable "has a first user ever been created"
+	// read fail, so a test can pin that Register surfaces an unreadable marker as
+	// 503 instead of treating it as "no users".
+	firstUserCreatedErr error
 }
 
 func (m *mockUserRepository) Create(ctx context.Context, user *models.User) error {
@@ -104,15 +104,28 @@ func (m *mockUserRepository) UpdatePassword(ctx context.Context, userID uuid.UUI
 	return m.err
 }
 
-// DetermineRoleAtomically reports the first-user decision. The mock's count is
-// the emptiness check: on an empty table (count 0) the next registration is the
-// bootstrap admin and bypasses the email allow-list; once the instance holds a
-// user, every later registration is an ordinary user.
-func (m *mockUserRepository) DetermineRoleAtomically(context.Context) (string, error) {
+func (m *mockUserRepository) CreateFirstUser(ctx context.Context, user *models.User) error {
+	// The mock's count decides whether the slot is free, mirroring the SQL's
+	// atomic emptiness check: an empty table admits the insert (as admin), any
+	// other table refuses it so the caller falls back onto the ordinary Create
+	// path (with its allow-list gate).
 	if m.count == 0 {
-		return models.RoleAdmin, nil
+		user.Role = models.RoleAdmin
+		m.user = user
+		return m.Create(ctx, user)
 	}
-	return models.RoleUser, nil
+	return repository.ErrFirstUserExists
+}
+
+// FirstUserCreated reports whether the mock believes the instance has been
+// bootstrapped. Registration uses it to skip the first-user advisory lock in
+// the steady state (see Register); the mock's count is what decides. A test can
+// make the read fail (firstUserCreatedErr) to exercise the 503 path.
+func (m *mockUserRepository) FirstUserCreated(context.Context) (bool, error) {
+	if m.firstUserCreatedErr != nil {
+		return false, m.firstUserCreatedErr
+	}
+	return m.count > 0, nil
 }
 
 type mockTokenRepository struct {
