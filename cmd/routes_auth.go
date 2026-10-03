@@ -24,6 +24,18 @@ func registerAuthRoutes(r chi.Router, d *deps, h *handlers) {
 		r.Group(func(r chi.Router) {
 			l.on(r, perPathIP("auth-login", 5, time.Minute)).Post("/login", h.auth.Login)
 			l.on(r, perPathIP("auth-register", 3, time.Minute)).Post("/register", h.auth.Register)
+			// The one-time first-user creation. Strict per-IP budget: it is the
+			// highest-value pre-auth endpoint on an unconfigured instance, and the
+			// boot key is 256 bits, so the limiter plus the key is what brute
+			// force has to get through.
+			l.on(r, perIP("auth-bootstrap", 3, 15*time.Minute)).Post("/bootstrap", h.bootstrap.Create)
+			// Public capability read: tells the UI and Ansible whether the instance
+			// still needs bootstrapping and whether registration is open. A modest
+			// per-IP budget keeps a single client from hammering the anonymous
+			// read, while staying page-load-friendly (the read itself is served
+			// from a short in-process TTL cache inside BootstrapService, see
+			// Status).
+			l.on(r, perIP("auth-status", 120, time.Minute)).Get("/status", h.bootstrap.Status)
 			// Higher than its neighbours because the access token now lives only in
 			// memory: every cold page load spends one refresh, where it used to take
 			// one only after the token expired. At five a minute, reloading a few

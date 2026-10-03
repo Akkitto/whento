@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -65,6 +66,7 @@ func (c *Config) Validate() error {
 		c.validateCrypto,
 		c.validateExpiries,
 		c.validateNetworkLists,
+		c.validateBootstrap,
 		c.validateProductionCoherence,
 	}
 	for _, check := range checks {
@@ -242,6 +244,40 @@ func validateCORSOrigins(origins []string) error {
 		if u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
 			return fmt.Errorf("CORS_ORIGINS entry %q must be a bare origin (scheme://host[:port]); a browser never sends a path, a query or a trailing slash in the Origin header", origin)
 		}
+	}
+	return nil
+}
+
+// validateBootstrap keeps the configured boot key consistent with what the
+// HTTP request validator will accept for POST /api/v1/auth/bootstrap. A
+// BOOTSTRAP_KEY outside the range the endpoint submits under would sail through
+// startup, be announced as active, and then be refused at the only place it is
+// ever used — an operator-facing dead end.
+//
+// The floor is environment-dependent: a production boot key must survive
+// real-world brute force on a rate-limited endpoint for the life of the
+// instance's first-user window, so it needs 32 Unicode code points of entropy;
+// development accepts 16 so test and demo environments (docker-compose.dev, the
+// suite itself) can pin short memorable keys. The 256-character ceiling is the
+// same in both, so a shell variable or _FILE secret that accidentally swallows
+// the rest of a wrapped line still fails loudly rather than validating as a
+// truncated key.
+func (c *Config) validateBootstrap() error {
+	const maxBootKeyLen = 256
+
+	minBootKeyLen := 16
+	if strings.EqualFold(c.AppEnv, productionEnv) {
+		minBootKeyLen = 32
+	}
+
+	if c.BootstrapKey == "" {
+		return nil
+	}
+
+	runes := utf8.RuneCountInString(c.BootstrapKey)
+	if runes < minBootKeyLen || runes > maxBootKeyLen {
+		return fmt.Errorf("BOOTSTRAP_KEY must be between %d and %d characters in APP_ENV=%s (it is %d); the bootstrap endpoint refuses anything else",
+			minBootKeyLen, maxBootKeyLen, c.AppEnv, runes)
 	}
 	return nil
 }

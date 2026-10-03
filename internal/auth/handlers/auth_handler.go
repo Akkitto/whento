@@ -121,16 +121,17 @@ func NewAuthHandler(
 // Register handles user registration
 //
 //	@Summary		Register a new user
-//	@Description	Creates a new user account. First registered user automatically becomes admin.
+//	@Description	Creates a new user account on an instance that has already been bootstrapped (its first account exists). A fresh instance refuses registration with 403 BOOTSTRAP_REQUIRED until POST /api/v1/auth/bootstrap has created the first (administrator) account.
 //	@Tags			Authentication
 //	@Accept			json
 //	@Produce		json
 //	@Param			request	body		models.RegisterRequest	true	"Registration details"
 //	@Success		201		{object}	models.AuthResponse
 //	@Failure		400		{object}	httputil.ErrorResponse	"Invalid request body or validation error"
-//	@Failure		403		{object}	httputil.ErrorResponse	"Registration disabled or email not allowed"
+//	@Failure		403		{object}	httputil.ErrorResponse	"Registration disabled, email not allowed, or bootstrap required"
 //	@Failure		409		{object}	httputil.ErrorResponse	"Email already exists"
 //	@Failure		429		{object}	httputil.ErrorResponse	"Rate limit exceeded"
+//	@Failure		503		{object}	httputil.ErrorResponse	"Registration state could not be determined"
 //	@Router			/api/v1/auth/register [post]
 func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	var req models.RegisterRequest
@@ -150,6 +151,24 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.authService.Register(r.Context(), &req)
 	if err != nil {
+		// The instance has never been bootstrapped: registration is not an
+		// admission path. A distinct code (not the generic FORBIDDEN) lets the
+		// frontend distinguish "come back after bootstrap" from "registration
+		// disabled", so the visitor can be steered to /bootstrap instead of being
+		// told registration simply failed.
+		if errors.Is(err, service.ErrBootstrapRequired) {
+			httputil.Error(w, http.StatusForbidden, httputil.ErrCodeBootstrapRequired, "Bootstrap is required before registration")
+			return
+		}
+		// The durable first-user marker could not be read. This must not be
+		// treated as "no users": the instance might already have an account (or
+		// a concurrent bootstrap may be mid-flight), so the only honest answer is
+		// a retryable service error.
+		if errors.Is(err, service.ErrRegistrationState) {
+			h.logger.Error("Failed to read registration state", "error", err)
+			httputil.Error(w, http.StatusServiceUnavailable, httputil.ErrCodeInternal, "Failed to determine registration state")
+			return
+		}
 		// Use identical error messages and status codes to prevent account enumeration.
 		// All user-facing registration failures return the same generic response
 		// so attackers cannot distinguish "email exists" from "email not allowed".

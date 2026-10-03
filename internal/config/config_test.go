@@ -37,7 +37,7 @@ func clearEnv(t *testing.T) {
 		"JWT_PRIVATE_KEY_PATH", "JWT_PUBLIC_KEY_PATH", "JWT_ACCESS_EXPIRY", "JWT_REFRESH_EXPIRY", "JWT_ISSUER",
 		"RATE_LIMIT_ENABLED", "RATE_LIMIT_KEY_SALT", "TRUSTED_PROXIES", "CORS_ORIGINS", "DISABLE_ROBOTS",
 		"METRICS_ENABLED", "METRICS_PORT",
-		"BCRYPT_COST", "ALLOWED_REGISTER", "ALLOWED_EMAILS",
+		"BCRYPT_COST", "ALLOWED_REGISTER", "ALLOWED_EMAILS", "BOOTSTRAP_KEY",
 		"EMAIL_VERIFICATION_ENABLED", "EMAIL_VERIFICATION_EXPIRY", "PASSWORD_RESET_EXPIRY", "MAGIC_LINK_EXPIRY",
 		"SMTP_HOST", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM", "SMTP_FROM_NAME",
 		"WEBAUTHN_RP_NAME", "WEBAUTHN_RP_ID", "WEBAUTHN_RP_ORIGIN", "WEBAUTHN_TIMEOUT",
@@ -47,6 +47,7 @@ func clearEnv(t *testing.T) {
 		// than CI does.
 		"DATABASE_URL" + secretFileSuffix, "DB_PASSWORD" + secretFileSuffix,
 		"REDIS_URL" + secretFileSuffix, "REDIS_PASSWORD" + secretFileSuffix,
+		"BOOTSTRAP_KEY" + secretFileSuffix,
 		"SMTP_PASSWORD" + secretFileSuffix, "RATE_LIMIT_KEY_SALT" + secretFileSuffix,
 	} {
 		t.Setenv(key, "")
@@ -127,6 +128,9 @@ func TestLoadDefaults(t *testing.T) {
 		{"DisableRobots", cfg.DisableRobots, false},
 		// 12 rounds is the production figure; the test suites lower it explicitly.
 		{"BcryptCost", cfg.BcryptCost, 12},
+		// An empty BOOTSTRAP_KEY means the process generates and logs a random
+		// one at startup; only an operator wanting deterministic automation pins it.
+		{"BootstrapKey", cfg.BootstrapKey, ""},
 		{"AllowedRegister", cfg.AllowedRegister, true},
 		{"EmailVerificationEnabled", cfg.Email.VerificationEnabled, false},
 		{"VerificationExpiry", cfg.Email.VerificationExpiry, 24 * time.Hour},
@@ -196,6 +200,7 @@ func TestLoadReadsTheEnvironment(t *testing.T) {
 	t.Setenv("RATE_LIMIT_ENABLED", "false")
 	t.Setenv("BCRYPT_COST", "14")
 	t.Setenv("ALLOWED_REGISTER", "false")
+	t.Setenv("BOOTSTRAP_KEY", "bootstrap-secret-key-0123456789abcdef")
 	t.Setenv("DISABLE_ROBOTS", "true")
 	t.Setenv("SMTP_PORT", "2525")
 	t.Setenv("TOTP_DIGITS", "8")
@@ -216,6 +221,9 @@ func TestLoadReadsTheEnvironment(t *testing.T) {
 	}
 	if cfg.RateLimitEnabled || cfg.AllowedRegister {
 		t.Error("a false in the environment did not turn the flag off")
+	}
+	if cfg.BootstrapKey != "bootstrap-secret-key-0123456789abcdef" {
+		t.Errorf("BootstrapKey = %q, want the BOOTSTRAP_KEY value", cfg.BootstrapKey)
 	}
 	if !cfg.DisableRobots {
 		t.Error("DISABLE_ROBOTS=true was not applied")
