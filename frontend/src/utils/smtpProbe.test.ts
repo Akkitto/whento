@@ -19,7 +19,7 @@ function savedConfig(): NotifyConfig {
     reminders: { enabled: true, hours_before: 24 },
     channels: {
       email: { enabled: true, recipient: 'owner' },
-      chat: { enabled: true, recipient: 'owner' },
+      discord: { enabled: true, recipient: 'owner' },
     },
   } as unknown as NotifyConfig;
 }
@@ -64,7 +64,7 @@ describe('applySmtpProbeToConfig', () => {
     for (const state of ['unknown', 'error'] as const) {
       const next = applySmtpProbeToConfig(savedConfig(), state);
       expect(next.channels.email.enabled).toBe(true);
-      expect(next.channels.chat.enabled).toBe(true);
+      expect(next.channels.discord.enabled).toBe(true);
     }
   });
 
@@ -76,7 +76,7 @@ describe('applySmtpProbeToConfig', () => {
   it('does not touch any other channel on any outcome', () => {
     for (const state of ['unknown', 'available', 'unavailable', 'error'] as const) {
       const next = applySmtpProbeToConfig(savedConfig(), state);
-      expect(next.channels.chat.enabled).toBe(true);
+      expect(next.channels.discord.enabled).toBe(true);
     }
   });
 });
