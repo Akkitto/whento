@@ -11,6 +11,7 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"log/slog"
@@ -27,6 +28,7 @@ import (
 	"github.com/whento/whento/internal/auth/models"
 	"github.com/whento/whento/internal/auth/repository"
 	"github.com/whento/whento/internal/config"
+	mfaRepo "github.com/whento/whento/internal/mfa/repository"
 )
 
 //go:embed templates/magic_link.html
@@ -38,6 +40,7 @@ var magicLinkTranslationsJSON string
 type MagicLinkService struct {
 	userRepo     *repository.UserRepository
 	tokenRepo    *repository.TokenRepository
+	mfaRepo      MFARepository
 	emailService *email.Service
 	jwtManager   *jwt.Manager
 	cfg          *config.Config
@@ -49,6 +52,7 @@ type MagicLinkService struct {
 func NewMagicLinkService(
 	userRepo *repository.UserRepository,
 	tokenRepo *repository.TokenRepository,
+	mfaRepo MFARepository,
 	emailService *email.Service,
 	jwtManager *jwt.Manager,
 	cfg *config.Config,
@@ -69,6 +73,7 @@ func NewMagicLinkService(
 	return &MagicLinkService{
 		userRepo:     userRepo,
 		tokenRepo:    tokenRepo,
+		mfaRepo:      mfaRepo,
 		emailService: emailService,
 		jwtManager:   jwtManager,
 		cfg:          cfg,
@@ -110,24 +115,53 @@ func (s *MagicLinkService) RequestMagicLink(ctx context.Context, email string) e
 		return nil // Return nil to avoid revealing internal errors
 	}
 
-	// Send email asynchronously (fire and forget)
+	// Send email asynchronously (fire and forget). The email is deliberately not
+	// sent on the request path — latency, and a failing mailer must not take down
+	// an already-successful request.
+	//
+	//nolint:contextcheck // detached on purpose; see RequestMagicLink.
 	go s.sendMagicLinkEmail(user.Email, user.DisplayName, user.Locale, token)
 
 	return nil // Always return nil (anti-enumeration)
 }
 
-// VerifyMagicLink verifies token and generates JWT auth response
+// VerifyMagicLink verifies token and generates JWT auth response.
+//
+// The token is consumed atomically (see ConsumeMagicLinkToken), and an
+// MFA-protected account does not get a session from the mailbox proof alone: it
+// receives a pending-MFA response that the second factor must complete through
+// the normal MFA flow. An infrastructure error in the MFA lookup is not treated
+// as "MFA disabled" — finalizing without the second factor would be a bypass.
 func (s *MagicLinkService) VerifyMagicLink(ctx context.Context, token string) (*models.AuthResponse, error) {
-	// Get user by token (validates expiry in SQL query)
-	user, err := s.userRepo.GetByMagicLinkToken(ctx, token)
+	// Claim the token atomically: the select and the clear commit together, so a
+	// racing verifier cannot both see a live token. A failed claim leaves the
+	// proof in place; the link stays usable.
+	user, err := s.userRepo.ConsumeMagicLinkToken(ctx, token)
 	if err != nil {
-		return nil, fmt.Errorf("invalid or expired magic link")
+		if errors.Is(err, repository.ErrUserNotFound) {
+			return nil, fmt.Errorf("invalid or expired magic link")
+		}
+		return nil, fmt.Errorf("failed to claim magic link token: %w", err)
 	}
 
-	// Clear token immediately (single-use enforcement)
-	if err := s.userRepo.ClearMagicLinkToken(ctx, user.ID); err != nil {
-		s.logger.Error("Failed to clear magic link token", "error", err)
-		// Continue anyway - user can still be authenticated
+	// Load MFA state, with errors distinguished from "no MFA configured". An
+	// infrastructure failure is a server fault, not a reason to skip the second
+	// factor.
+	mfa, err := s.mfaRepo.GetByUserID(ctx, user.ID)
+	if err != nil && !errors.Is(err, mfaRepo.ErrMFANotFound) {
+		return nil, fmt.Errorf("failed to check MFA status: %w", err)
+	}
+
+	if mfa != nil && mfa.Enabled {
+		tempToken, err := pendingMFAToken(s.jwtManager, user.ID, user.SecurityGeneration)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate temp token: %w", err)
+		}
+		return &models.AuthResponse{
+			RequireMFA: true,
+			TempToken:  tempToken,
+			User:       user,
+		}, nil
 	}
 
 	// Generate JWT tokens
@@ -136,7 +170,7 @@ func (s *MagicLinkService) VerifyMagicLink(ctx context.Context, token string) (*
 		return nil, fmt.Errorf("failed to generate access token: %w", err)
 	}
 
-	refreshToken, refreshExpiresAt, err := s.jwtManager.GenerateRefreshToken(user.ID.String())
+	refreshToken, refreshExpiresAt, familyID, err := s.jwtManager.IssueRefreshToken(user.ID.String(), "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate refresh token: %w", err)
 	}
@@ -146,19 +180,22 @@ func (s *MagicLinkService) VerifyMagicLink(ctx context.Context, token string) (*
 		UserID:    user.ID,
 		TokenHash: repository.HashToken(refreshToken),
 		ExpiresAt: refreshExpiresAt,
+		FamilyID:  familyID,
 	}
 	storedToken.ID = uuid.New()
 
-	if err := s.tokenRepo.Create(ctx, storedToken); err != nil {
+	if err := s.tokenRepo.Create(ctx, storedToken, user.SecurityGeneration); err != nil {
 		return nil, fmt.Errorf("failed to store refresh token: %w", err)
 	}
 
 	// Build auth response
 	return &models.AuthResponse{
-		AccessToken:  accessToken,
-		RefreshToken: refreshToken,
-		ExpiresIn:    int64(s.cfg.JWTAccessExpiry.Seconds()),
-		User:         user,
+		AccessToken:      accessToken,
+		RefreshToken:     refreshToken,
+		RefreshExpiresAt: refreshExpiresAt,
+		ExpiresIn:        int64(s.cfg.JWTAccessExpiry.Seconds()),
+		User:             user,
+		SessionID:        familyID,
 	}, nil
 }
 

@@ -124,6 +124,14 @@ export const useAuthStore = defineStore('auth', () => {
     return run('auth.resetPassword.error', async () => {
       const response = await authApi.resetPassword(token, newPassword);
 
+      // An MFA-protected account gets a pending challenge from a reset, not a
+      // session: the password has been changed, but the login must not complete
+      // until the second factor is verified. Mirroring login, nothing is stored
+      // and no token set here — the view routes to the MFA page instead.
+      if (response.require_mfa) {
+        return response;
+      }
+
       // Auto-login after successful reset
       user.value = response.user;
       if (response.access_token) {

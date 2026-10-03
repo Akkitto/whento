@@ -31,6 +31,7 @@ var (
 	ErrPasswordMismatch     = errors.New("current password is incorrect")
 	ErrCannotDeleteSelf     = errors.New("cannot delete your own account")
 	ErrCannotDemoteSelf     = errors.New("cannot change your own role")
+	ErrLastAdmin            = errors.New("the instance must keep at least one administrator")
 	ErrRegistrationDisabled = errors.New("new user registration is disabled")
 	ErrEmailNotAllowed      = errors.New("email address is not allowed to register")
 	ErrAccountLocked        = errors.New("too many failed login attempts, try again later")
@@ -42,29 +43,50 @@ const (
 	loginAttemptsPrefix = "login_attempts:"
 )
 
-// UserRepository defines the interface for user repository operations
+// UserRepository defines the interface for user repository operations. It is
+// deliberately the slice of the repository AuthService actually calls.
 type UserRepository interface {
 	Create(ctx context.Context, user *models.User) error
 	GetByID(ctx context.Context, id uuid.UUID) (*models.User, error)
 	GetByEmail(ctx context.Context, email string) (*models.User, error)
 	Update(ctx context.Context, user *models.User) error
+	UpdateProfile(
+		ctx context.Context,
+		userID uuid.UUID,
+		displayName *string,
+		locale *string,
+		timezone *string,
+	) (*models.User, error)
 	Delete(ctx context.Context, id uuid.UUID) error
-	Count(ctx context.Context) (int, error)
-	DetermineRoleAtomically(ctx context.Context) (string, error)
 	List(ctx context.Context) ([]*models.User, error)
 	UpdateRole(ctx context.Context, userID uuid.UUID, role string) error
 	UpdatePassword(ctx context.Context, userID uuid.UUID, passwordHash string) error
+	DetermineRoleAtomically(ctx context.Context) (string, error)
 }
 
 // TokenRepository defines the interface for token repository operations
 type TokenRepository interface {
-	Create(ctx context.Context, token *models.RefreshToken) error
+	Create(ctx context.Context, token *models.RefreshToken, securityGeneration int64) error
 	GetByHash(ctx context.Context, tokenHash string) (*models.RefreshToken, error)
 	// Consume marks a token rotated and reports whether this call won the race.
 	Consume(ctx context.Context, tokenHash string) (bool, error)
-	DeleteConsumedBefore(ctx context.Context, userID uuid.UUID, cutoff time.Time) error
+	// CreatePendingMFASession finalizes a pending-MFA login atomically: claims the
+	// temp token's JTI digest as a one-time nonce, verifies the captured security
+	// generation, and inserts the refresh token in one transaction. A failed
+	// session insert rolls the nonce claim back, so a transient failure never
+	// burns a pending token that created no session; concurrent finalizations
+	// still have exactly one winner. It reports whether this call created the
+	// session (false means the nonce was already claimed).
+	CreatePendingMFASession(ctx context.Context, digest string, nonceExpiresAt time.Time, token *models.RefreshToken, securityGeneration int64) (bool, error)
 	DeleteByHash(ctx context.Context, tokenHash string) error
-	DeleteByUserID(ctx context.Context, userID uuid.UUID) error
+	DeleteByUserID(ctx context.Context, userID uuid.UUID) (int64, error)
+	// CommitRotation consumes presentedHash and inserts successor under a per-user
+	// lock shared with RevokePresentedFamily, so a logout cannot lose to a successor
+	// published after it returned.
+	CommitRotation(ctx context.Context, presentedHash string, successor *models.RefreshToken, grace time.Duration) error
+	// RevokePresentedFamily deletes every refresh token for the user who presented
+	// tokenHash. A missing token is success.
+	RevokePresentedFamily(ctx context.Context, tokenHash string) error
 }
 
 // refreshGraceWindow is how long a rotated refresh token keeps working.
@@ -115,7 +137,13 @@ func NewAuthService(
 	}
 }
 
-// Register creates a new user account
+// Register creates a new user account.
+//
+// The first account of an instance is the administrator and is exempt from the
+// email allow-list. "First" is decided under an advisory lock by
+// DetermineRoleAtomically, so two racing registrations cannot both observe an
+// empty table and both become admin. Non-first users are subject to the
+// registration gate and the email allow-list.
 func (s *AuthService) Register(ctx context.Context, req *models.RegisterRequest) (*models.AuthResponse, error) {
 	// Hash password first (expensive operation, do outside any lock)
 	passwordHash, err := bcrypt.GenerateFromPassword([]byte(req.Password), s.bcryptCost)
@@ -166,7 +194,7 @@ func (s *AuthService) Register(ctx context.Context, req *models.RegisterRequest)
 	}
 
 	// Generate tokens
-	return s.generateAuthResponse(ctx, user)
+	return s.IssueSession(ctx, user)
 }
 
 // Login authenticates a user
@@ -216,7 +244,7 @@ func (s *AuthService) Login(ctx context.Context, req *models.LoginRequest) (*mod
 
 	// If MFA is enabled, return temporary token
 	if mfa != nil && mfa.Enabled {
-		tempToken, err := s.generateTempToken(user.ID)
+		tempToken, err := s.generateTempToken(user.ID, user.SecurityGeneration)
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate temp token: %w", err)
 		}
@@ -254,72 +282,99 @@ func (s *AuthService) incrementLoginAttempts(ctx context.Context, key string) {
 //	consumed, inside window   → rotate again; this is the other tab, or a retry
 //	consumed, outside window  → reuse: revoke every session this user has
 func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (*models.AuthResponse, error) {
-	// Validate refresh token format
-	userID, err := s.jwtManager.ValidateRefreshToken(refreshToken)
+	// Validate refresh token format and read the server family bound into it.
+	userID, familyID, err := s.jwtManager.RefreshIdentity(refreshToken)
 	if err != nil {
 		return nil, ErrInvalidToken
 	}
 
-	// Get token from database
-	tokenHash := repository.HashToken(refreshToken)
-	storedToken, err := s.tokenRepo.GetByHash(ctx, tokenHash)
-	if err != nil {
-		return nil, ErrInvalidToken
-	}
-
-	// Get user
 	uid, _ := uuid.Parse(userID)
 	user, err := s.userRepo.GetByID(ctx, uid)
 	if err != nil {
-		return nil, ErrUserNotFound
+		// A missing user is a genuine rejection: the token is structurally valid but
+		// its subject no longer exists. Any other failure — a dropped connection, an
+		// unreachable database — is not proof the presented credential is invalid; the
+		// user may exist but be momentarily unreadable. Preserve the underlying error
+		// so the handler can log it and return a server failure instead of telling the
+		// browser (and every other tab) that the session died.
+		if errors.Is(err, repository.ErrUserNotFound) {
+			return nil, ErrUserNotFound
+		}
+		return nil, fmt.Errorf("failed to load user for refresh: %w", err)
 	}
 
-	// Verify stored token matches user, before anything is written. The previous
-	// order deleted first and checked after, so a token belonging to somebody else
-	// was destroyed on the way to being rejected.
-	if storedToken.UserID != user.ID {
-		return nil, ErrInvalidToken
+	// A legacy token has no family. Every concurrent first refresh of that same
+	// token must land in one family, derived from the token rather than allocated
+	// per request. Rotation otherwise stays in the presented family.
+	if familyID == "" {
+		familyID = repository.LegacyFamilyID(refreshToken)
 	}
+	accessToken, err := s.jwtManager.GenerateAccessToken(user.ID.String(), user.Email, user.Role)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate access token: %w", err)
+	}
+	successorToken, expiresAt, familyID, err := s.jwtManager.IssueRefreshToken(user.ID.String(), familyID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate refresh token: %w", err)
+	}
+	successor := &models.RefreshToken{
+		UserID:    user.ID,
+		TokenHash: repository.HashToken(successorToken),
+		ExpiresAt: expiresAt,
+		FamilyID:  familyID,
+	}
+	successor.ID = uuid.New()
 
-	if storedToken.ConsumedAt != nil {
-		if time.Since(*storedToken.ConsumedAt) > refreshGraceWindow {
-			// Used, superseded, and used again. No honest client does that, so the
-			// cookie is assumed to be in someone else's hands and every session goes.
-			// The user signs in again; whoever else held it gets nothing.
-			if err := s.tokenRepo.DeleteByUserID(ctx, user.ID); err != nil {
-				logger.FromContext(ctx).Error("failed to revoke sessions after refresh token reuse",
-					"error", err, "user_ref", logger.Fingerprint(user.ID.String()))
-			}
-			// The one place a stolen refresh cookie becomes visible. Warn, not Info:
-			// somebody should be able to alert on it.
+	// Consume + insert under the same per-user lock logout uses. If a logout won
+	// the lock first, the presented token is gone and this returns an error — no
+	// successor is published, and the handler does not Set-Cookie.
+	if err := s.tokenRepo.CommitRotation(ctx, repository.HashToken(refreshToken), successor, refreshGraceWindow); err != nil {
+		// A cancelled or deadline-expired request is the caller going away, not a
+		// verdict on the credential; preserve it so the handler can tell the browser
+		// apart from a real rejection.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		// Genuine rejection sentinels: the presented token is not found, was reused
+		// beyond the grace window, or belongs to a different family. Each of these
+		// proves the presented credential cannot continue the session.
+		switch {
+		case errors.Is(err, repository.ErrTokenNotFound):
+			return nil, ErrInvalidToken
+		case errors.Is(err, repository.ErrTokenReuse):
 			logger.FromContext(ctx).Warn("refresh token reused after rotation; revoked every session for the user",
-				"user_ref", logger.Fingerprint(user.ID.String()),
-				"consumed_ago", time.Since(*storedToken.ConsumedAt).String())
-
+				"user_ref", logger.Fingerprint(user.ID.String()))
+			return nil, ErrInvalidToken
+		case errors.Is(err, repository.ErrFamilyMismatch):
+			logger.FromContext(ctx).Warn("refresh successor family did not match the ancestor; refused the split",
+				"user_ref", logger.Fingerprint(user.ID.String()))
 			return nil, ErrInvalidToken
 		}
-		// Inside the window: the other tab beat this one to it by a moment. Issuing a
-		// fresh pair is what keeps both of them signed in. Returning the *same* pair
-		// is not an option — only the hash was ever stored.
-	} else if _, err := s.tokenRepo.Consume(ctx, tokenHash); err != nil {
-		return nil, fmt.Errorf("failed to consume refresh token: %w", err)
+		// Anything else — a transaction that could not begin, a connection lost
+		// mid-rotation, an advisory-lock failure — is an infrastructure fault, not
+		// evidence the presented credential is invalid. Preserve the underlying error
+		// (it may be the *only* surviving trace of the outage) and let the handler
+		// answer with a server failure instead of a rejection.
+		return nil, fmt.Errorf("failed to rotate refresh token: %w", err)
 	}
 
-	// Spent tokens past the window are of no further use; dropping them here keeps
-	// the table from growing by one row per refresh for the life of the session.
-	if err := s.tokenRepo.DeleteConsumedBefore(ctx, user.ID, time.Now().Add(-refreshGraceWindow)); err != nil {
-		logger.FromContext(ctx).Error("failed to purge consumed refresh tokens",
-			"error", err, "user_ref", logger.Fingerprint(user.ID.String()))
-	}
-
-	// Generate new tokens
-	return s.generateAuthResponse(ctx, user)
+	return &models.AuthResponse{
+		AccessToken:      accessToken,
+		ExpiresIn:        int64(s.jwtManager.AccessExpiry().Seconds()),
+		RefreshToken:     successorToken,
+		RefreshExpiresAt: expiresAt,
+		User:             user,
+		SessionID:        familyID,
+	}, nil
 }
 
-// Logout invalidates the refresh token
+// Logout invalidates the refresh token and every successor a concurrent rotation
+// might otherwise publish for the same user.
 func (s *AuthService) Logout(ctx context.Context, refreshToken string) error {
-	tokenHash := repository.HashToken(refreshToken)
-	return s.tokenRepo.DeleteByHash(ctx, tokenHash)
+	if refreshToken == "" {
+		return nil
+	}
+	return s.tokenRepo.RevokePresentedFamily(ctx, repository.HashToken(refreshToken))
 }
 
 // GetCurrentUser returns the current user
@@ -347,27 +402,19 @@ func (s *AuthService) UpdateProfile(ctx context.Context, userID string, req *mod
 		return nil, ErrUserNotFound
 	}
 
-	user, err := s.userRepo.GetByID(ctx, uid)
-	if err != nil {
+	// The pre-update read only checks the account exists. The response is the row
+	// RETURNING from the write, so a field another request committed concurrently is
+	// not reported from this stale snapshot.
+	if _, err := s.userRepo.GetByID(ctx, uid); err != nil {
 		return nil, ErrUserNotFound
 	}
 
-	// Update fields if provided
-	if req.DisplayName != nil {
-		user.DisplayName = *req.DisplayName
-	}
-	if req.Locale != nil {
-		user.Locale = *req.Locale
-	}
-	if req.Timezone != nil {
-		user.Timezone = *req.Timezone
-	}
-
-	if err := s.userRepo.Update(ctx, user); err != nil {
+	updated, err := s.userRepo.UpdateProfile(ctx, uid, req.DisplayName, req.Locale, req.Timezone)
+	if err != nil {
 		return nil, fmt.Errorf("failed to update user: %w", err)
 	}
 
-	return user, nil
+	return updated, nil
 }
 
 // ChangePassword changes the current user's password
@@ -398,8 +445,11 @@ func (s *AuthService) ChangePassword(ctx context.Context, userID string, req *mo
 		return fmt.Errorf("failed to update password: %w", err)
 	}
 
-	// Invalidate all refresh tokens
-	_ = s.tokenRepo.DeleteByUserID(ctx, uid)
+	// Invalidate all refresh tokens and fence any login that already accepted
+	// the old password but has not yet inserted its session.
+	if _, err := s.tokenRepo.DeleteByUserID(ctx, uid); err != nil {
+		return fmt.Errorf("failed to revoke sessions: %w", err)
+	}
 
 	// Invalidate all active access tokens by recording password change time
 	if s.cache != nil && s.cache.IsEnabled() {
@@ -432,7 +482,14 @@ func (s *AuthService) UpdateUserRole(ctx context.Context, currentUserID, targetU
 		return ErrUserNotFound
 	}
 
-	return s.userRepo.UpdateRole(ctx, uid, role)
+	if err := s.userRepo.UpdateRole(ctx, uid, role); err != nil {
+		if errors.Is(err, repository.ErrLastAdmin) {
+			return ErrLastAdmin
+		}
+		return err
+	}
+
+	return nil
 }
 
 // DeleteUser deletes a user (admin only)
@@ -446,66 +503,103 @@ func (s *AuthService) DeleteUser(ctx context.Context, currentUserID, targetUserI
 		return ErrUserNotFound
 	}
 
-	return s.userRepo.Delete(ctx, uid)
+	if err := s.userRepo.Delete(ctx, uid); err != nil {
+		if errors.Is(err, repository.ErrLastAdmin) {
+			return ErrLastAdmin
+		}
+		return err
+	}
+
+	return nil
 }
 
-// generateAuthResponse issues the access/refresh token pair and persists the refresh
-// token hash. The refresh token write is a synchronous database call on the request
-// path, so it runs under the caller's context: a client disconnect, a request deadline
-// or a server shutdown must be able to cancel it.
+// IssueSession is the one place a fresh session is created: it issues the
+// access/refresh token pair and persists the refresh token hash. Register,
+// Login and the passkey and MFA completion paths all end on it, so none of them
+// can drift apart in what a signed-in response looks like. The refresh token
+// write is a synchronous database call on the request path, so it runs under
+// the caller's context: a client disconnect, a request deadline or a server
+// shutdown must be able to cancel it.
+func (s *AuthService) IssueSession(ctx context.Context, user *models.User) (*models.AuthResponse, error) {
+	return s.generateAuthResponse(ctx, user)
+}
+
 func (s *AuthService) generateAuthResponse(ctx context.Context, user *models.User) (*models.AuthResponse, error) {
-	// Generate access token
-	accessToken, err := s.jwtManager.GenerateAccessToken(user.ID.String(), user.Email, user.Role)
+	accessToken, refreshToken, expiresAt, familyID, storedToken, err := s.issueSessionTokens(user)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate access token: %w", err)
+		return nil, err
 	}
 
-	// Generate refresh token
-	refreshToken, expiresAt, err := s.jwtManager.GenerateRefreshToken(user.ID.String())
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate refresh token: %w", err)
-	}
-
-	// Store refresh token hash
-	storedToken := &models.RefreshToken{
-		UserID:    user.ID,
-		TokenHash: repository.HashToken(refreshToken),
-		ExpiresAt: expiresAt,
-	}
-	storedToken.ID = uuid.New()
-
-	if err := s.tokenRepo.Create(ctx, storedToken); err != nil {
+	if err := s.tokenRepo.Create(ctx, storedToken, user.SecurityGeneration); err != nil {
+		if errors.Is(err, repository.ErrStaleSecurityGeneration) {
+			return nil, ErrInvalidCredentials
+		}
 		return nil, fmt.Errorf("failed to store refresh token: %w", err)
 	}
 
+	return s.buildAuthResponse(user, accessToken, refreshToken, expiresAt, familyID)
+}
+
+// issueSessionTokens signs a fresh access/refresh pair and builds the refresh
+// token model ready for persistence. It is deliberately pure — no database
+// writes — so callers that must persist atomically (pending-MFA finalization)
+// can sign before entering the transaction.
+func (s *AuthService) issueSessionTokens(user *models.User) (
+	accessToken, refreshToken string,
+	expiresAt time.Time,
+	familyID string,
+	storedToken *models.RefreshToken,
+	err error,
+) {
+	// Generate access token
+	accessToken, err = s.jwtManager.GenerateAccessToken(user.ID.String(), user.Email, user.Role)
+	if err != nil {
+		return "", "", time.Time{}, "", nil, fmt.Errorf("failed to generate access token: %w", err)
+	}
+
+	// Generate refresh token in a new server-issued session family.
+	refreshToken, expiresAt, familyID, err = s.jwtManager.IssueRefreshToken(user.ID.String(), "")
+	if err != nil {
+		return "", "", time.Time{}, "", nil, fmt.Errorf("failed to generate refresh token: %w", err)
+	}
+
+	// Store refresh token hash
+	storedToken = &models.RefreshToken{
+		UserID:    user.ID,
+		TokenHash: repository.HashToken(refreshToken),
+		ExpiresAt: expiresAt,
+		FamilyID:  familyID,
+	}
+	storedToken.ID = uuid.New()
+
+	return accessToken, refreshToken, expiresAt, familyID, storedToken, nil
+}
+
+func (s *AuthService) buildAuthResponse(
+	user *models.User,
+	accessToken, refreshToken string,
+	expiresAt time.Time,
+	familyID string,
+) (*models.AuthResponse, error) {
 	return &models.AuthResponse{
 		AccessToken: accessToken,
 		// Read from the manager rather than written here. The literal 900 that used to
 		// sit in this field agreed with the token's real lifetime only at the default
 		// setting: an instance configuring JWT_ACCESS_EXPIRY got a number that did not
 		// describe the token it came with. The client schedules its refresh off this.
-		ExpiresIn:    int64(s.jwtManager.AccessExpiry().Seconds()),
-		RefreshToken: refreshToken,
-		User:         user,
+		ExpiresIn:        int64(s.jwtManager.AccessExpiry().Seconds()),
+		RefreshToken:     refreshToken,
+		RefreshExpiresAt: expiresAt,
+		User:             user,
+		SessionID:        familyID,
 	}, nil
 }
 
-// generateTempToken generates a temporary token for 2FA verification (5-minute expiry)
-func (s *AuthService) generateTempToken(userID uuid.UUID) (string, error) {
-	// Generate a short-lived JWT with 5-minute expiry
-	// We'll use the access token generator but with a shorter expiry
-	// The token will contain the user ID and a special "mfa_pending" claim
-	expiresAt := time.Now().Add(5 * time.Minute)
-	token, err := s.jwtManager.GenerateCustomToken(map[string]interface{}{
-		"user_id":     userID.String(),
-		"mfa_pending": true,
-		"exp":         expiresAt.Unix(),
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to generate temp token: %w", err)
-	}
-
-	return token, nil
+// generateTempToken generates a temporary token for 2FA verification (5-minute expiry).
+// securityGeneration is the value observed when the password or passkey was accepted.
+// Finalization must present that same value; a later security transition invalidates it.
+func (s *AuthService) generateTempToken(userID uuid.UUID, securityGeneration int64) (string, error) {
+	return pendingMFAToken(s.jwtManager, userID, securityGeneration)
 }
 
 // PasskeyLogin authenticates a user via passkey
@@ -519,7 +613,7 @@ func (s *AuthService) PasskeyLogin(ctx context.Context, user *models.User) (*mod
 
 	// If MFA is enabled, require TOTP verification even after passkey auth
 	if mfa != nil && mfa.Enabled {
-		tempToken, err := s.generateTempToken(user.ID)
+		tempToken, err := s.generateTempToken(user.ID, user.SecurityGeneration)
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate temp token: %w", err)
 		}
@@ -549,20 +643,19 @@ func (s *AuthService) VerifyMFAAndLogin(ctx context.Context, tempToken string, m
 		return nil, ErrInvalidToken
 	}
 
-	// Prevent temp token replay: check JTI hasn't been consumed
+	// The JTI is claimed as a one-time nonce, but not until the session commits.
+	// CreatePendingMFASession consumes it and inserts the refresh token in one
+	// transaction, so a failed session insert rolls the claim back and the same
+	// still-valid temp token can be retried.
 	jti, _ := claims["jti"].(string)
-	if jti != "" && s.cache != nil {
-		// A jti is opaque, but it is still the identifier of one person's
-		// half-completed sign-in, and it is the value carried by a token that is
-		// still valid for five minutes. It is stored as a digest for the same
-		// reason as everything else here.
-		key := "mfa_used_jti:" + cache.HashKeyPart(jti)
-		used, _ := s.cache.Exists(ctx, key)
-		if used {
-			return nil, ErrInvalidToken
-		}
-		// Mark JTI as consumed (TTL matches temp token expiry: 5 minutes)
-		_ = s.cache.Set(ctx, key, true, 6*time.Minute)
+	if jti == "" {
+		return nil, ErrInvalidToken
+	}
+	// The nonce expires with the signed token itself, so a consumed identifier
+	// cannot outlive the temp token that carried it.
+	nonceExpiresAt := time.Now().Add(5 * time.Minute)
+	if expRaw, ok := claims["exp"].(float64); ok {
+		nonceExpiresAt = time.Unix(int64(expRaw), 0)
 	}
 
 	// Extract user ID
@@ -576,12 +669,62 @@ func (s *AuthService) VerifyMFAAndLogin(ctx context.Context, tempToken string, m
 		return nil, ErrInvalidToken
 	}
 
-	// Get user
-	user, err := s.userRepo.GetByID(ctx, userID)
-	if err != nil {
-		return nil, ErrUserNotFound
+	// The generation captured when the password or passkey was accepted. A token
+	// minted before that claim existed, or after a security transition, is refused.
+	generation, ok := securityGenerationClaim(claims["sec_gen"])
+	if !ok {
+		return nil, ErrInvalidToken
 	}
 
-	// Generate full tokens
-	return s.generateAuthResponse(ctx, user)
+	// Get user. Only a genuine missing lookup is the client's invalid-credential
+	// outcome; a connection failure, timeout, or other database error is a server
+	// fault and must stay distinguishable so the handler can log it and answer
+	// HTTP 500 rather than telling the client to restart a valid login.
+	user, err := s.userRepo.GetByID(ctx, userID)
+	if err != nil {
+		if errors.Is(err, repository.ErrUserNotFound) {
+			return nil, ErrUserNotFound
+		}
+		return nil, fmt.Errorf("failed to look up user for MFA finalization: %w", err)
+	}
+
+	// Sign the access/refresh pair before the transaction, so nothing in the
+	// atomic session commit depends on a signing failure happening partway.
+	accessToken, refreshToken, refreshExpiresAt, familyID, storedToken, err := s.issueSessionTokens(user)
+	if err != nil {
+		return nil, err
+	}
+
+	// One atomic database operation: claim the JTI nonce, check the captured
+	// generation against the row-locked current one, and insert the refresh
+	// token. Exactly one concurrent finalization wins; a failure rolls the nonce
+	// back, so a retry after a transient session-write error succeeds.
+	won, err := s.tokenRepo.CreatePendingMFASession(ctx, repository.HashToken(jti), nonceExpiresAt, storedToken, generation)
+	if err != nil {
+		if errors.Is(err, repository.ErrStaleSecurityGeneration) {
+			return nil, ErrInvalidCredentials
+		}
+		if errors.Is(err, repository.ErrUserNotFound) {
+			return nil, ErrUserNotFound
+		}
+		return nil, fmt.Errorf("failed to finalize MFA login: %w", err)
+	}
+	if !won {
+		return nil, ErrInvalidToken
+	}
+
+	return s.buildAuthResponse(user, accessToken, refreshToken, refreshExpiresAt, familyID)
+}
+
+func securityGenerationClaim(raw interface{}) (int64, bool) {
+	switch value := raw.(type) {
+	case float64:
+		return int64(value), value >= 0 && value == float64(int64(value))
+	case int64:
+		return value, value >= 0
+	case int:
+		return int64(value), value >= 0
+	default:
+		return 0, false
+	}
 }

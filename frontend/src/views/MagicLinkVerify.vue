@@ -8,12 +8,10 @@
   <div class="flex min-h-[calc(100vh-4rem)] items-center justify-center py-12">
     <div class="w-full max-w-md animate-slide-up">
       <div class="card text-center">
-        <!-- The page has three mutually exclusive states, none of which carries a title of its
-             own, so the document heading is visually hidden. -->
         <h1 class="sr-only">{{ t('a11y.magicLinkTitle') }}</h1>
 
-        <!-- Loading State -->
-        <div v-if="loading">
+        <!-- Loading State (verification in flight after the user confirms) -->
+        <div v-if="verifying">
           <div
             class="mx-auto mb-4 h-16 w-16 animate-spin rounded-full border-4 border-primary-200 border-t-primary-600 dark:border-primary-800 dark:border-t-primary-400"
           />
@@ -52,13 +50,13 @@
           </router-link>
         </div>
 
-        <!-- Success State (should auto-redirect) -->
+        <!-- Confirmation State: the link alone must never sign the visitor in -->
         <div v-else>
           <div
-            class="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-success-100 dark:bg-success-900/20"
+            class="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-primary-100 dark:bg-primary-900/20"
           >
             <svg
-              class="h-8 w-8 text-success-600"
+              class="h-8 w-8 text-primary-600"
               fill="none"
               stroke="currentColor"
               viewBox="0 0 24 24"
@@ -67,13 +65,29 @@
                 stroke-linecap="round"
                 stroke-linejoin="round"
                 stroke-width="2"
-                d="M5 13l4 4L19 7"
+                d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 6z"
               />
             </svg>
           </div>
-          <p class="text-gray-600 dark:text-gray-400">
-            {{ t('auth.magicLink.success') }}
+          <h2 class="mb-2 text-xl font-semibold text-gray-900 dark:text-white">
+            {{ t('auth.magicLink.confirmTitle') }}
+          </h2>
+          <p class="mb-4 text-gray-600 dark:text-gray-400">
+            {{ t('auth.magicLink.confirmDescription') }}
           </p>
+
+          <!-- An already-authenticated visitor must be told this switches accounts
+               before they trigger it. -->
+          <div
+            v-if="authStore.isAuthenticated"
+            class="mb-4 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-200"
+          >
+            {{ t('auth.magicLink.accountSwitchWarning') }}
+          </div>
+
+          <button type="button" class="btn btn-primary w-full" @click="confirmVerification">
+            {{ t('auth.magicLink.confirmButton') }}
+          </button>
         </div>
       </div>
     </div>
@@ -93,41 +107,62 @@ const route = useRoute();
 const { t } = useI18n();
 const authStore = useAuthStore();
 
-const loading = ref(true);
+const verifying = ref(false);
 const error = ref('');
+// The 64-hex token is held in memory only: it is removed from the URL below so it
+// stops being visible in the address bar and in history, and it is never written
+// to localStorage.
+const token = ref('');
 
-onMounted(async () => {
-  const token = route.params.token as string;
+onMounted(() => {
+  const rawToken = route.params.token as string;
 
-  if (!token) {
+  if (!rawToken || rawToken.length !== 64) {
     error.value = t('auth.magicLink.missingToken');
-    loading.value = false;
     return;
   }
 
-  try {
-    // Verify magic link
-    const response = await authApi.verifyMagicLink(token);
+  token.value = rawToken;
 
-    // A verified magic link always carries a session. Without one there is nothing
-    // to sign in with, and setting the user anyway would leave the app looking
-    // authenticated with no token behind it.
-    if (!response.access_token) {
-      error.value = t('auth.magicLink.verifyError');
-      loading.value = false;
+  // Keep the token for the confirmation attempt, but scrub it from the visible
+  // history URL so it does not sit in the address bar, in server logs or in
+  // shared-link tools after the page has loaded.
+  const cleanPath = route.path.replace(/\/[^/]+$/, '/');
+  history.replaceState(null, '', cleanPath);
+});
+
+async function confirmVerification() {
+  if (!token.value) {
+    error.value = t('auth.magicLink.missingToken');
+    return;
+  }
+
+  verifying.value = true;
+  error.value = '';
+
+  try {
+    const response = await authApi.verifyMagicLink(token.value);
+
+    // An MFA-protected account gets a pending challenge, not a session: route to
+    // the same second-factor flow a password login would use. The temp token
+    // lives in the store so the redirect survives.
+    if (response?.require_mfa && response?.temp_token) {
+      authStore.setTempToken(response.temp_token);
+      router.push('/verify-mfa');
       return;
     }
 
-    // Set auth tokens in store
+    if (!response?.access_token) {
+      error.value = t('auth.magicLink.verifyError');
+      verifying.value = false;
+      return;
+    }
+
     authStore.user = response.user;
     apiClient.setToken(response.access_token, response.expires_in);
-
-    // Redirect to dashboard
-    await router.push('/dashboard');
+    router.push('/dashboard');
   } catch (err: any) {
-    loading.value = false;
-
-    // Translate error messages
+    verifying.value = false;
     if (err.message?.includes('expired')) {
       error.value = t('auth.magicLink.expired');
     } else if (err.message?.includes('invalid')) {
@@ -136,5 +171,5 @@ onMounted(async () => {
       error.value = t('auth.magicLink.verifyError');
     }
   }
-});
+}
 </script>

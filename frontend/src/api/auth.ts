@@ -51,8 +51,22 @@ export const authApi = {
     return apiClient.post<{ message: string }>('/auth/magic-link/request', { email });
   },
 
+  /**
+   * Verify a magic link.
+   *
+   * Verification is deliberately POST + same-origin: the GET flow let an
+   * attack-site link log an already-authenticated visitor into another account.
+   * The visitor confirms the link on the SPA first, and this call carries the
+   * explicit intent header so a plain form post or cross-site script cannot
+   * trigger a login. The server answers either a full session or, for an
+   * MFA-protected account, a pending-MFA challenge with no session at all.
+   */
   async verifyMagicLink(token: string): Promise<AuthResponse> {
-    return apiClient.get<AuthResponse>(`/auth/magic-link/verify/${token}`);
+    return apiClient.post<AuthResponse>(
+      '/auth/magic-link/verify',
+      { token },
+      { headers: { 'X-Whento-Auth-Intent': 'magic-link' } }
+    );
   },
 
   async checkMagicLinkAvailable(): Promise<{ available: boolean }> {

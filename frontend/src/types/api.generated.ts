@@ -264,7 +264,7 @@ export interface paths {
     head?: never;
     /**
      * Update user role
-     * @description Updates a user's role (admin or user). Admin only. Cannot change own role.
+     * @description Updates a user's role (admin or user). Admin only. Cannot change own role. The last administrator cannot be demoted.
      */
     patch: {
       parameters: {
@@ -294,7 +294,7 @@ export interface paths {
             };
           };
         };
-        /** @description Cannot change own role or invalid request */
+        /** @description Cannot change own role, cannot demote the last administrator, or invalid request */
         400: {
           headers: {
             [name: string]: unknown;
@@ -623,6 +623,80 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/api/v1/auth/magic-link/verify': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Verify magic link
+     * @description Verifies a magic link token. The caller must first confirm the
+     *     intent (the SPA shows a confirmation page), then POST the token
+     *     same-origin with the X-Whento-Auth-Intent header. MFA-protected
+     *     accounts receive a pending-MFA response instead of a session.
+     */
+    post: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      /** @description Magic link token */
+      requestBody: {
+        content: {
+          'application/json': components['schemas']['models.MagicLinkVerifyRequest'];
+        };
+      };
+      responses: {
+        /** @description OK */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['models.AuthResponse'];
+          };
+        };
+        /** @description Invalid request body or validation error */
+        400: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['httputil.ErrorResponse'];
+          };
+        };
+        /** @description Missing or disallowed origin, or missing intent header */
+        403: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['httputil.ErrorResponse'];
+          };
+        };
+        /** @description Rate limit exceeded */
+        429: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['httputil.ErrorResponse'];
+          };
+        };
+      };
+    };
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/api/v1/auth/magic-link/verify/{token}': {
     parameters: {
       query?: never;
@@ -631,8 +705,9 @@ export interface paths {
       cookie?: never;
     };
     /**
-     * Verify magic link
-     * @description Verifies a magic link token and logs in the user. Returns JWT tokens on success.
+     * Verify magic link (legacy GET, read-only)
+     * @description Deprecated read-only endpoint that no longer consumes the token
+     *     or logs the visitor in. Responds 405 with Allow: POST instead.
      */
     get: {
       parameters: {
@@ -646,17 +721,8 @@ export interface paths {
       };
       requestBody?: never;
       responses: {
-        /** @description OK */
-        200: {
-          headers: {
-            [name: string]: unknown;
-          };
-          content: {
-            'application/json': components['schemas']['models.AuthResponse'];
-          };
-        };
-        /** @description Invalid or expired magic link token */
-        400: {
+        /** @description Method not allowed; use POST */
+        405: {
           headers: {
             [name: string]: unknown;
           };
@@ -1102,6 +1168,15 @@ export interface paths {
         };
         /** @description Invalid or expired refresh token */
         401: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['httputil.ErrorResponse'];
+          };
+        };
+        /** @description Infrastructure failure - the presented token may still be valid; retry */
+        500: {
           headers: {
             [name: string]: unknown;
           };
@@ -4659,6 +4734,12 @@ export interface components {
       expires_in?: number;
       /** @description True if 2FA verification is required */
       require_mfa?: boolean;
+      /**
+       * @description SessionID is the server-issued family of the refresh cookie this response
+       *     belongs to. It is stable across rotation and new on every login, so clients
+       *     can converge on the cookie's family instead of a locally guessed nonce.
+       */
+      session_id?: string;
       /** @description Temporary token for 2FA flow (5min expiry) */
       temp_token?: string;
       user?: components['schemas']['models.User'];
@@ -4816,6 +4897,9 @@ export interface components {
     };
     'models.MagicLinkResponse': {
       message?: string;
+    };
+    'models.MagicLinkVerifyRequest': {
+      token: string;
     };
     'models.MFAStatus': {
       passkey_count?: number;

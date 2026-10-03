@@ -155,11 +155,14 @@
       "requestError": "Échec de l'envoi du lien magique",
       "verifying": "Vérification de votre lien magique...",
       "verifyError": "Échec de la vérification du lien magique",
-      "success": "Connexion réussie ! Redirection...",
       "invalidTitle": "Lien magique invalide",
       "invalid": "Ce lien magique est invalide ou a déjà été utilisé.",
       "expired": "Ce lien magique a expiré. Veuillez en demander un nouveau.",
-      "missingToken": "Aucun jeton de lien magique fourni."
+      "missingToken": "Aucun jeton de lien magique fourni.",
+      "confirmTitle": "Confirmer le lien de connexion",
+      "confirmDescription": "Ce lien prouve l'accès au compte email auquel il a été envoyé. Confirmez pour vous connecter au compte lié.",
+      "confirmButton": "Continuer la connexion",
+      "accountSwitchWarning": "Vous êtes déjà connecté(e). L'utilisation de ce lien remplace le compte actuellement affiché par le compte auquel le lien a été envoyé."
     },
     "invalidPassword": "Mot de passe incorrect",
     "logoutError": "Échec de la déconnexion",
