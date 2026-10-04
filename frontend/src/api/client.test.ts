@@ -157,15 +157,19 @@ function deferred<T>() {
 }
 
 describe('apiClient', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    live.forEach(c => c.dispose());
+    live = [];
+    // Node delivers BroadcastChannel posts as tasks, including posts whose sender
+    // has since closed. Drain them before installing the next test's credentials.
+    apiClient.clearToken();
+    await drainChannel();
     localStorage.clear();
     apiClient.clearToken();
     // The singleton is one long-lived module instance across the whole suite; its
     // in-memory signed-out families must not leak from a test that signed a family out
     // into one that logs the same family in again.
     (apiClient as unknown as { signedOutFamilies: Set<string> }).signedOutFamilies.clear();
-    live.forEach(c => c.dispose());
-    live = [];
     routeMeta.public = false;
     currentRoute.fullPath = '/dashboard';
     currentRoute.name = 'dashboard';
