@@ -133,3 +133,40 @@ bash scripts/build-migrations.sh selfhosted "$scratch2"
 The safe path to actually apply (or reset) migrations is the guarded wrapper:
 `scripts/migrate.sh up|status|down|reset` (see its `--help`), which owns its own
 scratch directory and requires explicit consent for `reset`/`down`.
+
+Run the script-level and dotenv regression checks with:
+
+```bash
+bash scripts/test-migrations.sh
+```
+
+For real PostgreSQL acceptance, use a disposable server whose connection user
+can create databases. Both `psql` and `migrate` must be on PATH (or supply
+`MIGRATE_BIN`). Missing tools fail rather than skip when integration is requested:
+
+```bash
+DISPOSABLE_DB_URL='postgres://test:test@localhost:5432/whento_test?sslmode=disable' \
+  bash scripts/test-migrations.sh
+```
+
+The harness creates four randomly named databases and drops only those databases
+on exit; it never resets the database named in `DISPOSABLE_DB_URL`. Each build
+variant is checked at version 5 to prove the selected licensing/billing schema,
+then migrated to the current version. Upgrade cases start at version 15 with
+sentinel user/calendar records and verify preservation and bootstrap backfill.
+
+## Local environment syntax
+
+Migration scripts read `.env` from the working directory as data, not executable
+shell code. Existing environment variables take precedence. File assignments
+may have leading whitespace, optional `export`, or spaces around `=`; duplicate
+keys use the last assignment. Single-quoted values are literal. Double-quoted
+values support `\n`, `\r`, `\t`, `\"`, `\\`, and `\$`; other escapes are preserved.
+Unquoted values may have a whitespace-prefixed `#` comment. Quoted values may be
+followed by whitespace and a comment. Variable/command expansion and multiline
+values are deliberately unsupported. Malformed input fails without printing
+values or partially exporting the file.
+
+An explicit `DATABASE_URL` is passed unchanged; otherwise credentials and the
+database name from `DB_*` are UTF-8 byte-wise percent-encoded. Logged PostgreSQL
+URIs redact userinfo and query-string `password`/`sslpassword` values.

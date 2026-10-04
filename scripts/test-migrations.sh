@@ -12,8 +12,9 @@
 #
 #   bash scripts/test-migrations.sh
 #
-# A real disposable-DB integration section runs when DISPOSABLE_DB_URL and a
-# real `migrate` binary are available (CI/devshells provide both):
+# A real integration section runs when DISPOSABLE_DB_URL is set. It requires
+# psql, migrate, and CREATE DATABASE permission on that disposable server. Four
+# randomly named databases are created and dropped; the supplied DB is untouched.
 #
 #   MIGRATE_BIN=/path/to/migrate \
 #   DISPOSABLE_DB_URL='postgres://...' bash scripts/test-migrations.sh
@@ -23,7 +24,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/whento-migtest.XXXXXX")"
-trap 'rm -rf -- "$WORK"' EXIT
+created_databases=()
+cleanup() {
+    local database
+    for database in "${created_databases[@]}"; do
+        psql "$DISPOSABLE_DB_URL" -v ON_ERROR_STOP=1 -qc "DROP DATABASE \"$database\" WITH (FORCE)" || true
+    done
+    rm -rf -- "$WORK"
+}
+trap cleanup EXIT
 mkdir -p "$WORK/bin"
 
 PASS=0
@@ -36,11 +45,13 @@ bad() { FAIL=$((FAIL + 1)); failures+=("$1"); }
 check() { # check <description> <command...>
     local desc="$1"
     shift
-    if "$@" >/dev/null 2>&1; then
+    local output="$WORK/check-$((PASS + FAIL + 1)).log"
+    if "$@" >"$output" 2>&1; then
         ok
     else
         bad "FAIL: $desc"
         echo "  $desc" >&2
+        cat "$output" >&2
     fi
 }
 
@@ -106,11 +117,10 @@ dbname="${url##*/}"
 dbname="${dbname%%\?*}"
 [ -n "${PASS_PSQL_AS_DB:-}" ] && dbname="$PASS_PSQL_AS_DB"
 # If the SQL text asks for current_database() just echo the dbname.
-if printf '%s' "$*" | grep -q 'current_database'; then
-    printf '%s\n' "$dbname"
-fi
 if printf '%s' "$*" | grep -q 'current_database() ||'; then
     printf '%s\n' "${PASS_PSQL_AS_IDENTITY:-$dbname|whento|5432}"
+elif printf '%s' "$*" | grep -q 'current_database'; then
+    printf '%s\n' "$dbname"
 fi
 exit 0
 EOF
@@ -124,6 +134,7 @@ for f in scripts/migrate.sh scripts/init-db.sh scripts/build-migrations.sh scrip
     check "bash -n $f" bash -n "$f"
 done
 check "build-migrations.sh is sh -n clean" sh -n scripts/build-migrations.sh
+check "dotenv, encoding and credential-redaction regressions" bash scripts/test-migration-helpers.sh
 
 # ------------------------------------------------------ one canonical URL
 FAKE_URL="postgres://u:pass@host:5432/db?sslmode=disable"
@@ -247,55 +258,76 @@ check "reset on never-initialized DB still runs up" test "$(grep -c ' up$' "$FAK
 # 14. status reports no-version with exit 0 but propagates a real version error
 : > "$FAKE_LOG"
 set +e
-wrap FAKE_MIGRATE_MODE=no-version bash "$MIG" status >/tmp/status-nov.log 2>&1
+wrap FAKE_MIGRATE_MODE=no-version bash "$MIG" status >"$WORK/status-nov.log" 2>&1
 s_rc=$?
 set -e
 check "status no-version exits 0" test "$s_rc" = "0"
-check "status no-version message mentions nil" grep -q "No migrations applied yet" /tmp/status-nov.log
+check "status no-version message mentions nil" grep -q "No migrations applied yet" "$WORK/status-nov.log"
 
 : > "$FAKE_LOG"
 set +e
-wrap FAKE_MIGRATE_MODE=version-error bash "$MIG" status >/tmp/status-err.log 2>&1
+wrap FAKE_MIGRATE_MODE=version-error bash "$MIG" status >"$WORK/status-err.log" 2>&1
 s_rc=$?
 set -e
 check "status real error exits nonzero" test "$s_rc" != "0"
 
-# ------------------------------------------------------------------ summary
+# ------------------------------------------------------------- real-disposable DB
+if [ -n "${DISPOSABLE_DB_URL:-}" ]; then
+    echo
+    echo "=== Real disposable-DB integration (DISPOSABLE_DB_URL set) ==="
+    export MIGRATE_BIN="${MIGRATE_BIN:-migrate}"
+    command -v "$MIGRATE_BIN" >/dev/null || { echo 'migrate is required for the requested integration tests' >&2; exit 1; }
+    command -v psql >/dev/null || { echo 'psql is required for the requested integration tests' >&2; exit 1; }
+    [[ "$DISPOSABLE_DB_URL" =~ ^postgres(ql)?://[^/]+/[^?]+(\?.*)?$ ]] || {
+        echo 'DISPOSABLE_DB_URL must be a PostgreSQL URI with a database path' >&2; exit 1;
+    }
+    admin_base="${DISPOSABLE_DB_URL%%\?*}"
+    admin_base="${admin_base%/*}"
+    admin_query=""
+    [[ "$DISPOSABLE_DB_URL" != *\?* ]] || admin_query="?${DISPOSABLE_DB_URL#*\?}"
+    unique="${WORK##*.}_$$"
+    unique="${unique,,}"
+
+    real_variant() {
+        local variant="$1" mode="$2" database="whento_mig_${unique}_${1}_${2}" uri chain opposite expected
+        # Names contain only this generated prefix, ASCII letters, digits and '_'.
+        [[ "$database" =~ ^whento_mig_[a-z0-9_]+$ ]] || return 1
+        psql "$DISPOSABLE_DB_URL" -v ON_ERROR_STOP=1 -qc "CREATE DATABASE \"$database\"" || return 1
+        created_databases+=("$database")
+        uri="$admin_base/$database$admin_query"
+        chain="$(mktemp -d "$WORK/${variant}-${mode}.XXXXXX")"
+        bash scripts/build-migrations.sh "$variant" "$chain" >/dev/null || return 1
+        "$MIGRATE_BIN" -path "$chain" -database "$uri" goto 5 || return 1
+        if [ "$variant" = selfhosted ]; then expected=licenses; opposite=subscriptions; else expected=subscriptions; opposite=licenses; fi
+        [ "$(psql "$uri" -Atqc "SELECT to_regclass('public.$expected') IS NOT NULL AND to_regclass('public.$opposite') IS NULL")" = t ] || return 1
+        if [ "$mode" = upgrade ]; then
+            "$MIGRATE_BIN" -path "$chain" -database "$uri" goto 15 || return 1
+            psql "$uri" -v ON_ERROR_STOP=1 -qc "INSERT INTO users (id,email,password_hash,display_name) VALUES ('00000000-0000-4000-8000-000000000163','migration-sentinel@example.test','not-a-login-hash','Preserved'); INSERT INTO calendars(owner_id,name) VALUES ('00000000-0000-4000-8000-000000000163','Migration sentinel')" || return 1
+        fi
+        DATABASE_URL="$uri" BUILD_TYPE="$variant" bash "$MIG" up || return 1
+        DATABASE_URL="$uri" BUILD_TYPE="$variant" bash "$MIG" status >"$WORK/${variant}-${mode}-status.log" 2>&1 || return 1
+        [ "$(psql "$uri" -Atqc "SELECT to_regclass('public.reminder_jobs') IS NOT NULL AND NOT dirty FROM schema_migrations")" = t ] || return 1
+        if [ "$mode" = upgrade ]; then
+            [ "$(psql "$uri" -Atqc "SELECT first_user_created FROM app_state WHERE id=1")" = t ] || return 1
+            [ "$(psql "$uri" -Atqc "SELECT count(*) FROM calendars WHERE name='Migration sentinel'")" = 1 ] || return 1
+            [ "$(psql "$uri" -Atqc "SELECT display_name FROM users WHERE email='migration-sentinel@example.test'")" = Preserved ] || return 1
+        else
+            [ "$(psql "$uri" -Atqc "SELECT first_user_created FROM app_state WHERE id=1")" = f ] || return 1
+        fi
+    }
+    for variant in selfhosted cloud; do
+        for mode in fresh upgrade; do
+            check "real $variant $mode migration and variant identity" real_variant "$variant" "$mode"
+        done
+    done
+else
+    echo
+    echo "=== Real integration not requested (set DISPOSABLE_DB_URL + MIGRATE_BIN) ==="
+fi
+
 echo
 echo "=== Script acceptance: $PASS passed, $FAIL failed ==="
 if [ "$FAIL" -gt 0 ]; then
     printf '%s\n' "${failures[@]}" >&2
     exit 1
 fi
-
-# ------------------------------------------------------------- real-disposable DB
-if [ -n "${DISPOSABLE_DB_URL:-}" ] && command -v "${MIGRATE_BIN:-migrate}" >/dev/null 2>&1; then
-    echo
-    echo "=== Real disposable-DB integration (DISPOSABLE_DB_URL set) ==="
-    export MIGRATE_BIN="${MIGRATE_BIN:-migrate}"
-    export DATABASE_URL="$DISPOSABLE_DB_URL"
-
-    self_dir="$(mktemp -d "$WORK/self.XXXXXX")"
-    cloud_dir="$(mktemp -d "$WORK/cloud.XXXXXX")"
-    env -i PATH="$WORK/bin:/usr/bin:/bin" bash scripts/build-migrations.sh selfhosted "$self_dir" >/dev/null 2>&1
-    env -i PATH="$WORK/bin:/usr/bin:/bin" bash scripts/build-migrations.sh cloud "$cloud_dir" >/dev/null 2>&1
-
-    # Both variant chains must assemble and apply cleanly on a fresh DB (the
-    # real-DB check is a genuine round trip, not a fake tool).
-    "$MIGRATE_BIN" -path "$self_dir" -database "$DISPOSABLE_DB_URL" up >/dev/null 2>&1
-    check "real selfhosted chain applies cleanly" test "$?" = "0"
-    "$MIGRATE_BIN" -path "$cloud_dir" -database "$DISPOSABLE_DB_URL" up >/dev/null 2>&1
-    check "real cloud chain applies cleanly on the same DB" test "$?" = "0"
-
-    # The real wrapper's own up + status path, still via the real migrate binary.
-    DATABASE_URL="$DISPOSABLE_DB_URL" bash "$MIG" up >/dev/null 2>&1
-    check "real wrapper up applies cleanly" test "$?" = "0"
-    DATABASE_URL="$DISPOSABLE_DB_URL" bash "$MIG" status >/tmp/real-status.out 2>&1
-    check "real wrapper status reports a version" test "$?" = "0"
-    echo "  real wrapper status: $(grep -v '^Building\|^Migrations built' /tmp/real-status.out | tail -1)"
-else
-    echo
-    echo "=== Real disposable-DB integration skipped (set DISPOSABLE_DB_URL + MIGRATE_BIN) ==="
-fi
-
-exit 0
