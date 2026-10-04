@@ -400,6 +400,7 @@ import type { CalendarWithParticipants } from '@/types';
 import QuotaUsage from '@/components/QuotaUsage.vue';
 import CalendarCard from '@/components/dashboard/CalendarCard.vue';
 import { translateErrorMessage } from '@/utils/errorTranslator';
+import { useAccountScopedReload } from '@/composables/useAccountScopedReload';
 
 const router = useRouter();
 const { t } = useI18n();
@@ -408,6 +409,26 @@ const calendarStore = useCalendarStore();
 const dashboardStore = useDashboardStore();
 const unifiedFeedStore = useUnifiedFeedStore();
 const toastStore = useToastStore();
+
+// A remote account replacement (or a refresh that discovered a different server
+// family) advances the local account generation, not a document reload (the loop
+// this PR removes). Clear and reload this account's own data instead.
+useAccountScopedReload(() => {
+  void loadCalendars();
+  void unifiedFeedStore.fetchConfig().catch(() => {
+    toastStore.error(unifiedFeedStore.error ?? t('errors.unexpected'));
+  });
+});
+
+// A remote account replacement (or a refresh that discovered a different server
+// family) advances the local account generation; reload this account's own data
+// instead of letting the whole document reload (the behaviour this PR removes).
+useAccountScopedReload(() => {
+  void loadCalendars();
+  void unifiedFeedStore.fetchConfig().catch(() => {
+    toastStore.error(unifiedFeedStore.error ?? t('errors.unexpected'));
+  });
+});
 
 const user = computed(() => authStore.user);
 const calendars = computed(() => {
