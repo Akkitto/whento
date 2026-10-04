@@ -438,8 +438,7 @@ async function handleSubmit() {
     // freshly created calendar.
     if (notifyConfig.value.enabled) {
       try {
-        // Only a confirmed 'unavailable' SMTP probe persists email.enabled=false;
-        // an errored or unfinished probe must not rewrite the owner's choice.
+        // SMTP capability gates delivery, never the owner's saved preference.
         await updateNotifyConfig(
           calendar.id,
           applySmtpProbeToConfig(notifyConfig.value, smtpProbe.value)
