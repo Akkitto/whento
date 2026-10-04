@@ -66,21 +66,21 @@ make migrate-status-all
 
 ```bash
 # Create migration files
-migrate create -ext sql -dir migrations/common -seq migration_name
+bash scripts/migrate.sh create common migration_name
 ```
 
 ### Cloud-only Migration
 
 ```bash
 # Create migration files
-migrate create -ext sql -dir migrations/cloud -seq migration_name
+bash scripts/migrate.sh create cloud migration_name
 ```
 
 ### Self-hosted-only Migration
 
 ```bash
 # Create migration files
-migrate create -ext sql -dir migrations/selfhosted -seq migration_name
+bash scripts/migrate.sh create selfhosted migration_name
 ```
 
 ## Migration Naming
@@ -99,17 +99,23 @@ Never hard-code "the next version" by hand: compute it from the actual assembled
 chain, so the answer stays correct as the inventory grows.
 
 ```bash
-# Highest number across common + the variant you are adding to.
+# Highest number across all source directories (decimal, even with zero padding).
 next_migration_num() {
     find migrations/common migrations/selfhosted migrations/cloud \
         -name '*.sql' -printf '%f\n' 2>/dev/null \
         | sed -E 's/^([0-9]+).*/\1/' \
         | sort -n | tail -1
 }
-echo "Next free version: $(( $(next_migration_num) + 1 ))"
+highest=$(next_migration_num)
+echo "Next free version: $((10#$highest + 1))"
 ```
 `scripts/migrate.sh create <variant> <name>` also picks the next number for you
-(via golang-migrate's `-seq`), so in practice the manual check above is just a
+by seeding a private staging directory with the global numeric maximum before
+calling golang-migrate's `-seq`. Calling `migrate create -seq` directly in a
+variant directory is unsafe: it ignores the common chain. The wrapper serializes
+creation and publishes the new pair without overwriting existing files or
+symlinks. If a creator is forcibly killed, inspect and remove the empty
+`migrations/.create-lock` directory before retrying. The check above is just a
 sanity read for reviews.
 
 > These numbers apply to **this repository's chain**. The fork that preceded this
@@ -132,7 +138,9 @@ bash scripts/build-migrations.sh selfhosted "$scratch2"
 ```
 The safe path to actually apply (or reset) migrations is the guarded wrapper:
 `scripts/migrate.sh up|status|down|reset` (see its `--help`), which owns its own
-scratch directory and requires explicit consent for `reset`/`down`.
+scratch directory and requires typed database confirmation (or matching
+noninteractive flags) for `reset`. `down [N]` is an explicitly destructive
+rollback command; it does not prompt for confirmation.
 
 Run the script-level and dotenv regression checks with:
 

@@ -66,6 +66,22 @@ cat > "$WORK/bin/migrate" <<'EOF'
 #!/bin/bash
 echo "migrate $*" >> "$FAKE_LOG"
 orig_args="$*"   # keep before the shift loop below empties $@
+if [ "${1:-}" = create ]; then
+    shift
+    dir=""
+    while [ $# -gt 1 ]; do
+        case "$1" in
+            -dir) dir="$2"; shift 2 ;;
+            -ext) shift 2 ;;
+            -seq) shift ;;
+            *) exit 9 ;;
+        esac
+    done
+    highest=$(find "$dir" -name '*.sql' -printf '%f\n' | sed -nE 's/^([0-9]+)_.*/\1/p' | sort -n | tail -1)
+    printf -v next '%06d' "$((10#$highest + 1))"
+    touch "$dir/${next}_$1.up.sql" "$dir/${next}_$1.down.sql"
+    exit 0
+fi
 path=""
 database=""
 while [ $# -gt 0 ]; do
@@ -226,10 +242,68 @@ paths="$(grep -oE -- '-path [^ ]*' "$FAKE_LOG" | sort -u)"
 count="$(printf '%s\n' "$paths" | wc -l)"
 check "two concurrent invocations use distinct scratch dirs" test "$count" = "2"
 
-# 10. create passes the right variant directory and name to golang-migrate
-: > "$FAKE_LOG"
-wrap bash "$MIG" create selfhosted smoke_test >/dev/null 2>&1 || true
-check "create passes -dir migrations/selfhosted" grep -q 'create -ext sql -dir migrations/selfhosted -seq smoke_test' "$FAKE_LOG"
+# 10. Creation tests operate on a disposable source copy, never the worktree.
+# Use the real CLI when MIGRATE_BIN is supplied (as in PostgreSQL acceptance).
+creation_repo="$WORK/creation-repo"
+mkdir -p "$creation_repo/scripts"
+cp scripts/migrate.sh scripts/migration-common.sh "$creation_repo/scripts/"
+cp -R migrations "$creation_repo/"
+creator="${MIGRATE_BIN:-$WORK/bin/migrate}"
+create_in_fixture() {
+    (cd "$creation_repo" && wrap MIGRATE_BIN="$creator" bash scripts/migrate.sh create "$@")
+}
+highest_before="$(find migrations/common migrations/cloud migrations/selfhosted -name '*.sql' -printf '%f\n' \
+    | sed -nE 's/^([0-9]+)_.*/\1/p' | sort -n | tail -1)"
+next=$((10#$highest_before + 1))
+for variant in selfhosted common cloud; do
+    check "create $variant succeeds" create_in_fixture "$variant" smoke_test
+    printf -v prefix '%06d' "$next"
+    check "create $variant uses the global next version and publishes both files" \
+        test -f "$creation_repo/migrations/$variant/${prefix}_smoke_test.up.sql" \
+        -a -f "$creation_repo/migrations/$variant/${prefix}_smoke_test.down.sql"
+    next=$((next + 1))
+done
+reject_create() { if create_in_fixture "$@"; then return 1; fi; }
+check "create rejects path traversal" reject_create common ../escape
+mkdir "$creation_repo/migrations/.create-lock"
+check "create refuses an existing creation lock" reject_create common locked
+rmdir "$creation_repo/migrations/.create-lock"
+check "create preserves existing source migrations" diff -r migrations/common/ "$creation_repo/migrations/common/" \
+    --exclude='*_smoke_test.up.sql' --exclude='*_smoke_test.down.sql'
+
+# Installation must work with no migrate executable, without parsing database
+# configuration, and without overwriting a preexisting file in shared TMPDIR.
+# Only transport/checksum/archive operations are doubled in this unit section.
+install_tools="$WORK/install-tools"
+install_dir="$WORK/install-destination"
+mkdir -p "$install_tools" "$install_dir"
+cat > "$install_tools/curl" <<'EOF'
+#!/bin/bash
+printf '' > "$3"
+EOF
+cat > "$install_tools/sha256sum" <<'EOF'
+#!/bin/bash
+cat > "$INSTALL_LOG"
+EOF
+cat > "$install_tools/tar" <<'EOF'
+#!/bin/bash
+printf '#!/bin/bash\necho v4.19.1\n' > "$4/migrate"
+chmod +x "$4/migrate"
+EOF
+chmod +x "$install_tools/"*
+install_fixture() {
+    env -i PATH="$install_tools:/usr/bin:/bin" TMPDIR="$install_dir" \
+        MIGRATE_BIN=/not-installed/migrate DATABASE_URL=not-a-database \
+        INSTALL_LOG="$WORK/install-checksum.log" bash "$MIG" install-migrate
+}
+check "install works without migrate or valid database configuration" install_fixture
+check "installed binary is executable" test -x "$install_dir/migrate-v4.19.1"
+check "installer requests the pinned archive checksum" grep -q \
+    '^2ac648fbd1b127b69ab5a7b33cf96212178f71e22379fc50573630c6f4c7ce18 ' "$WORK/install-checksum.log"
+reject_install() { if install_fixture; then return 1; fi; }
+check "install refuses to replace an existing binary" reject_install
+check "installer cleans only its own staging directories" \
+    test "$(find "$install_dir" -mindepth 1 -maxdepth 1 | wc -l)" = 1
 
 # 11. unset DEVCONTAINER and explicit DATABASE_URL vs contradictory DB_*: the
 # wrapper must use the explicit URL, never build from DB_*.

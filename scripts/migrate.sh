@@ -311,24 +311,81 @@ cmd_create() {
         echo "error: create requires a migration <name>" >&2
         exit 2
     fi
-    "$MIGRATE_BIN" create -ext sql -dir "migrations/$variant" -seq "$name"
+    if [[ ! "$name" =~ ^[a-zA-Z][a-zA-Z0-9_]*$ ]] || [ "${#COMMAND_ARGS[@]}" -ne 2 ]; then
+        echo "error: create expects a variant and an alphanumeric/underscore migration name" >&2
+        exit 2
+    fi
+
+    # The CLI only considers the directory passed to -dir. Seed a private
+    # staging directory with the numeric maximum across ALL source directories,
+    # otherwise a variant ending at 013 would create 014, colliding with common.
+    # A repository-local lock serializes wrapper invocations across variants.
+    (
+        lock="migrations/.create-lock"
+        if ! mkdir "$lock"; then
+            echo "error: another migration create is active; if it was killed, inspect and remove the empty $lock directory" >&2
+            exit 1
+        fi
+        scratch=""
+        installed_up=""
+        complete=0
+        trap 'if [ "$complete" = 0 ] && [ -n "$installed_up" ]; then rm -f -- "$installed_up"; fi; if [ -n "$scratch" ]; then rm -rf -- "$scratch"; fi; rmdir -- "$lock"' EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+        # Keep staging on the destination filesystem so exclusive hard links
+        # publish the files without replacing an existing file or symlink.
+        scratch="$(mktemp -d migrations/.create.XXXXXX)"
+        highest="$(find migrations/common migrations/cloud migrations/selfhosted -maxdepth 1 -name '*.sql' -printf '%f\n' \
+            | sed -nE 's/^([0-9]+)_.*/\1/p' | sort -n | tail -1)"
+        highest="${highest:-0}"
+        seed="$scratch/${highest}_sequence.up.sql"
+        touch "$seed"
+        "$MIGRATE_BIN" create -ext sql -dir "$scratch" -seq "$name"
+        rm -- "$seed"
+        shopt -s nullglob
+        up_files=("$scratch/"*"_$name.up.sql")
+        down_files=("$scratch/"*"_$name.down.sql")
+        if [ "${#up_files[@]}" -ne 1 ] || [ "${#down_files[@]}" -ne 1 ]; then
+            echo "error: migrate did not create a complete migration pair" >&2
+            exit 1
+        fi
+        up="migrations/$variant/${up_files[0]##*/}"
+        down="migrations/$variant/${down_files[0]##*/}"
+        ln -T -- "${up_files[0]}" "$up"
+        installed_up="$up"
+        ln -T -- "${down_files[0]}" "$down"
+        complete=1
+        printf '%s\n' "$up" "$down"
+    )
 }
 
 cmd_install_migrate() {
-    : "${TMPDIR:-/tmp}"
-    local version="v4.19.1"
-    local tarball="$TMPDIR/migrate-$version.tar.gz"
-    echo "Downloading golang-migrate $version (release binary, same as CI)..."
-    curl -sSLf -o "$tarball" \
-        "https://github.com/golang-migrate/migrate/releases/download/${version}/migrate.linux-amd64.tar.gz"
-    echo "Verifying SHA256 (pinned in .github/workflows/ci.yml)..."
-    echo "2ac648fbd1b127b69ab5a7b33cf96212178f71e22379fc50573630c6f4c7ce18  $tarball" | sha256sum -c -
-    tar xzf "$tarball" -C "$TMPDIR" migrate
-    mv "$TMPDIR/migrate" "$TMPDIR/migrate-$version"
-    echo "Installed to $TMPDIR/migrate-$version. Add it to PATH or set MIGRATE_BIN."
+    (
+        version="v4.19.1"
+        install_dir="${TMPDIR:-/tmp}"
+        scratch="$(mktemp -d "$install_dir/whento-migrate-install.XXXXXX")"
+        trap 'rm -rf -- "$scratch"' EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+        tarball="$scratch/migrate.tar.gz"
+        echo "Downloading golang-migrate $version (release binary, same as CI)..."
+        curl -sSLf -o "$tarball" \
+            "https://github.com/golang-migrate/migrate/releases/download/${version}/migrate.linux-amd64.tar.gz"
+        echo "Verifying SHA256 (pinned in .github/workflows/ci.yml)..."
+        echo "2ac648fbd1b127b69ab5a7b33cf96212178f71e22379fc50573630c6f4c7ce18  $tarball" | sha256sum -c -
+        tar xzf "$tarball" -C "$scratch" migrate
+        # Refuse to replace an existing binary or symlink in a shared temp dir.
+        ln -T -- "$scratch/migrate" "$install_dir/migrate-$version"
+        echo "Installed to $install_dir/migrate-$version. Add it to PATH or set MIGRATE_BIN."
+    )
 }
 
 main() {
+    # Installing a missing CLI must not require that CLI (or database settings).
+    case "$COMMAND" in
+        install-migrate) cmd_install_migrate; return ;;
+        create) check_migrate_bin; cmd_create; return ;;
+    esac
     migration_resolve_database_url
     check_migrate_bin
 
@@ -337,8 +394,6 @@ main() {
         down) cmd_down ;;
         status) cmd_status ;;
         reset) cmd_reset ;;
-        create) cmd_create ;;
-        install-migrate) cmd_install_migrate ;;
         *)
             echo "error: unknown command '$COMMAND'" >&2
             usage >&2
