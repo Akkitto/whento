@@ -1328,6 +1328,22 @@ describe('apiClient', () => {
   });
 
   describe('refreshing before the token dies', () => {
+    it('re-arms a browser timer that fires just before the lead window', async () => {
+      vi.useFakeTimers();
+      try {
+        const seen = withAdapter(() => ok({ access_token: 'fresh', expires_in: 120 }));
+        apiClient.setToken('current', 120);
+        const early = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 59_999);
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(seen.filter(r => r.url === '/auth/refresh')).toHaveLength(0);
+        early.mockRestore();
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(seen.filter(r => r.url === '/auth/refresh')).toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('schedules a refresh a minute short of expiry', async () => {
       vi.useFakeTimers();
       try {
