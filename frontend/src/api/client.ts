@@ -50,9 +50,41 @@ const SESSION_FLAG = 'whento.session';
  */
 const LOGGED_OUT_FAMILY_KEY = 'whento.loggedOutFamily';
 
+/** Latest server-confirmed login family. Non-secret; never an access token. */
+const ACTIVE_FAMILY_KEY = 'whento.activeFamily';
+
+function readActiveFamily(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return normalizeFamily(localStorage.getItem(ACTIVE_FAMILY_KEY));
+  } catch {
+    return null;
+  }
+}
+
+function writeActiveFamily(family: string | null) {
+  if (typeof window === 'undefined') return;
+  try {
+    if (family === null) localStorage.removeItem(ACTIVE_FAMILY_KEY);
+    else localStorage.setItem(ACTIVE_FAMILY_KEY, family);
+  } catch {
+    // Storage denied: retired families still fence this tab in memory.
+  }
+}
+
 /** Names the cross-tab channel and the cross-tab cookie lock. */
 const AUTH_CHANNEL = 'whento.auth';
 const COOKIE_LOCK = 'whento.cookie';
+
+const SESSION_ISSUANCE_PATHS = new Set([
+  '/auth/login',
+  '/auth/register',
+  '/auth/bootstrap',
+  '/auth/mfa/verify',
+  '/auth/passkey/login/finish',
+  '/auth/magic-link/verify',
+  '/auth/reset-password',
+]);
 
 /**
  * How far ahead of expiry to refresh.
@@ -222,7 +254,7 @@ export class ApiClient {
   private sessionGeneration = 0;
   /**
    * Families this tab has *signed out of* (its own sign-out, or a logout message from
-   * another tab). A delayed token broadcast from one of them must never resurrect the
+   * another tab), or superseded by another login. A delayed token from one must never resurrect the
    * session, no matter how late it arrives.
    */
   private signedOutFamilies = new Set<string>();
@@ -422,6 +454,12 @@ export class ApiClient {
     }
     const family = normalizeFamily(message.family ?? null);
 
+    // A cold tab may never have held the old family. The shared, server-confirmed
+    // family also fences messages queued before the latest login in another tab.
+    const activeFamily = readActiveFamily();
+    if (activeFamily !== null && family !== activeFamily) return;
+    if (this.familyId !== null && family === null) return;
+
     // A token for a family this browser deliberately signed out of must not resurrect
     // the session — even when it arrives long after the logout that ended it.
     if (family !== null) {
@@ -445,6 +483,7 @@ export class ApiClient {
     // every request/refresh issued under the previous family is voided, then tell the
     // account stores to reset and confirm the identity through /auth/me exactly once.
     if (family !== null && family !== this.familyId) {
+      if (this.familyId !== null) this.signedOutFamilies.add(this.familyId);
       this.sessionGeneration += 1;
       this.familyId = family;
       this.accessToken = message.token;
@@ -474,6 +513,8 @@ export class ApiClient {
    */
   private acceptRemoteLogout(message: Extract<AuthMessage, { type: 'logout' }>) {
     const family = normalizeFamily(message.family ?? null);
+    const activeFamily = readActiveFamily();
+    if (family !== null && activeFamily !== null && family !== activeFamily) return;
     if (family !== null) {
       if (this.familyId !== null && family !== this.familyId) {
         return;
@@ -501,9 +542,26 @@ export class ApiClient {
     if (typeof window === 'undefined') return null;
     const onStorage = (event: StorageEvent) => {
       if (this.disposed) return;
+      if (event.key === ACTIVE_FAMILY_KEY && this.channel === null) {
+        const family = normalizeFamily(event.newValue);
+        if (family === null || family === this.familyId) return;
+        if (this.signedOutFamilies.has(family)) return;
+        if (this.familyId !== null) this.signedOutFamilies.add(this.familyId);
+        this.sessionGeneration += 1;
+        this.familyId = family;
+        this.accessToken = null;
+        this.scheduleRefreshAt(null);
+        this.setSessionFlag();
+        // No credentials travel through storage. Reset the old account first;
+        // the receiver hydrates using the shared httpOnly cookie and /auth/me.
+        this.dispatchRemoteSession(family);
+        return;
+      }
       if (event.key !== LOGGED_OUT_FAMILY_KEY) return;
       const family = normalizeFamily(event.newValue ?? null);
       if (family === null || family === event.oldValue) return;
+      const activeFamily = readActiveFamily();
+      if (activeFamily !== null && activeFamily !== family) return;
       // Another tab deliberately signed that family out. If it is the family we hold
       // (or we hold none), end this tab's copy of the session without touching the
       // peer's newer one — a delayed logout for an old family cannot clear a new one.
@@ -676,6 +734,7 @@ export class ApiClient {
     if (family !== null) {
       this.signedOutFamilies.add(family);
       writeLoggedOutFamily(family);
+      if (readActiveFamily() === family) writeActiveFamily(null);
     }
     this.broadcast({ type: 'logout', family });
   }
@@ -742,10 +801,14 @@ export class ApiClient {
    */
   setToken(token: string, expiresInSeconds?: number, sessionId?: string) {
     const family = normalizeFamily(sessionId ?? null);
+    // Finalized credentials are installed under the cookie lock. Stores may repeat
+    // the same installation as they commit the corresponding user payload.
+    if (this.accessToken === token && this.familyId === family) return;
     const hadFamily = this.familyId !== null;
     const familyChanged = family !== null && hadFamily && family !== this.familyId;
 
     if (familyChanged) {
+      if (this.familyId !== null) this.signedOutFamilies.add(this.familyId);
       this.sessionGeneration += 1;
       this.familyId = family;
     } else if (this.familyId === null) {
@@ -754,6 +817,7 @@ export class ApiClient {
 
     this.accessToken = token;
     this.scheduleRefresh(expiresInSeconds);
+    writeActiveFamily(this.familyId);
     // A flag and the family id, never the token: anything persisted is readable by any
     // script that gets to run on the page. The refresh cookie is what actually proves
     // the session.
@@ -770,10 +834,14 @@ export class ApiClient {
    * that was in flight when the session ended cannot store its response afterwards.
    */
   clearToken() {
+    const previousFamily = this.familyId;
+    const activeFamily = readActiveFamily();
     this.accessToken = null;
     this.familyId = null;
     this.scheduleRefresh();
-    this.removeSessionFlag();
+    if (previousFamily === null || activeFamily === null || previousFamily === activeFamily) {
+      this.removeSessionFlag();
+    }
     this.sessionGeneration += 1;
   }
 
@@ -901,6 +969,13 @@ export class ApiClient {
       if (newToken) {
         const newFamily = normalizeFamily(response.data.data?.session_id ?? null);
         const familyChanged = newFamily !== null && family !== null && newFamily !== family;
+        const activeFamily = readActiveFamily();
+        if (newFamily !== null && this.signedOutFamilies.has(newFamily)) {
+          throw new StaleRefreshError('refresh belongs to a retired family');
+        }
+        if (activeFamily !== null && activeFamily !== family && newFamily !== activeFamily) {
+          throw new StaleRefreshError('refresh conflicts with the latest login family');
+        }
         this.setToken(newToken, response.data.data?.expires_in, response.data.data?.session_id);
         // A refresh that adopted a different server family means the shared refresh
         // cookie belonged to a different login than the one this tab described. That is
@@ -943,8 +1018,22 @@ export class ApiClient {
   }
 
   async post<T>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T> {
-    const response = await this.client.post<ApiResponse<T>>(url, data, config);
-    return response.data.data as T;
+    const send = async () => {
+      const response = await this.client.post<ApiResponse<T>>(url, data, config);
+      const result = response.data.data as T;
+      if (SESSION_ISSUANCE_PATHS.has(url) && result && typeof result === 'object') {
+        const session = result as {
+          access_token?: string;
+          expires_in?: number;
+          session_id?: string;
+        };
+        if (typeof session.access_token === 'string' && session.access_token.length > 0) {
+          this.setToken(session.access_token, session.expires_in, session.session_id);
+        }
+      }
+      return result;
+    };
+    return SESSION_ISSUANCE_PATHS.has(url) ? this.withCookieLock(send) : send();
   }
 
   async patch<T>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T> {
