@@ -53,10 +53,15 @@ async function orderOnPage(page: Page) {
 }
 
 async function startCustomOrder(page: Page) {
+  const apiRequests: string[] = [];
+  page.on('request', request => {
+    if (new URL(request.url()).pathname.startsWith('/api/')) apiRequests.push(request.url());
+  });
   await page.goto(PREVIEW);
   await expect(page.locator('#dashboard-sort')).toHaveCount(1, { timeout: 10_000 });
   await page.selectOption('#dashboard-sort', 'custom');
   await expect(page.locator('article[data-calendar-id]')).toHaveCount(4);
+  expect(apiRequests).toEqual([]);
 }
 
 test.describe('dashboard keyboard reordering — list view', () => {

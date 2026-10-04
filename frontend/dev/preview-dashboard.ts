@@ -10,7 +10,7 @@
  * The dashboard list and the unified feed live behind the API, which makes the views
  * impossible to exercise without a full stack. This entry mounts the *real*
  * `Dashboard.vue` (stores, locale, ordering, focus handling and all) against fixture
- * data by stubbing the two API objects the view fetches on mount, so Playwright can
+ * data by stubbing every API read the view makes on mount, so Playwright can
  * drive a genuine keyboard session against it with nothing running behind it.
  *
  * Served by `vite dev` at /dev/preview-dashboard.html. It is not part of the
@@ -28,6 +28,7 @@ import DashboardPreviewApp from './DashboardPreviewApp.vue';
 import Dashboard from '../src/views/Dashboard.vue';
 import { calendarsApi } from '../src/api/calendars';
 import { unifiedFeedApi } from '../src/api/unifiedFeed';
+import { apiClient } from '../src/api/client';
 import { useAuthStore } from '../src/stores/auth';
 import type { CalendarWithParticipants } from '../src/types';
 
@@ -45,6 +46,17 @@ const FABRICATED_CALENDARS = [
 // Patch the API objects the dashboard fetches on mount so they succeed offline.
 calendarsApi.getAll = (async () => FABRICATED_CALENDARS) as typeof calendarsApi.getAll;
 unifiedFeedApi.getConfig = (async () => ({ configured: false })) as typeof unifiedFeedApi.getConfig;
+// QuotaUsage also fetches on mount. Keep the preview genuinely offline even when
+// a developer happens to have a real backend running at Vite's proxy target.
+apiClient.get = async <T>(path: string): Promise<T> => {
+  if (path !== '/quota/limits') throw new Error(`Unexpected offline preview API read: ${path}`);
+  return {
+    server_usage: FABRICATED_CALENDARS.length,
+    can_create: true,
+    limitation_type: 'none',
+    upgrade_url: '',
+  } as T;
+};
 
 const i18n = createI18n({
   legacy: false,
