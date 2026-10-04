@@ -5,7 +5,7 @@
  */
 
 import { expect, type Browser, type BrowserContext, type Page } from '@playwright/test';
-import { createRequire } from 'node:module';
+import { Client } from 'pg';
 
 /**
  * Two-page session-coordination helpers.
@@ -13,11 +13,9 @@ import { createRequire } from 'node:module';
  * The acceptance suite for PR-7 has to see two tabs of one browser (shared refresh
  * cookie, shared localStorage, shared BroadcastChannel) driving the *real* server.
  * These helpers stand between the spec and Playwright: login through the UI, count
- * auth traffic, and — when `pg` is available — count refresh-token rows directly in
+ * auth traffic, and count refresh-token rows directly in
  * the disposable Postgres so "no growing token rows" is measured, not assumed.
  */
-
-const require = createRequire(import.meta.url);
 
 export interface TrafficCounter {
   authRefresh: number;
@@ -142,28 +140,24 @@ export function wait(ms: number): Promise<void> {
 }
 
 /**
- * Total rows in `refresh_tokens` — the database-side evidence that a run of tabs is
- * not minting sessions. `null` when no PostgreSQL client is installed in this
- * environment (the request-level bounds still verify the same property).
+ * Rows for this scenario's family only. This assertion is mandatory: missing
+ * configuration or a database client failure must fail the acceptance suite.
  */
-export async function countRefreshTokenRows(databaseUrl: string): Promise<number | null> {
-  let pg: {
-    Client: new (opts: unknown) => {
-      connect(): Promise<void>;
-      query(s: string): Promise<{ rows: unknown[] }>;
-      end(): Promise<void>;
-    };
-  };
-  try {
-    pg = require('pg');
-  } catch {
-    return null;
+export async function countRefreshTokenRows(
+  databaseUrl: string | undefined,
+  family: string | undefined
+): Promise<number> {
+  if (!databaseUrl || !family) {
+    throw new Error('Session acceptance requires DATABASE_URL and a captured server family.');
   }
-  const client = new pg.Client({ connectionString: databaseUrl });
+  const client = new Client({ connectionString: databaseUrl });
   try {
     await client.connect();
-    const result = await client.query('SELECT COUNT(*)::int AS n FROM refresh_tokens');
-    return (result.rows[0] as { n: number }).n;
+    const result = await client.query<{ n: number }>(
+      'SELECT COUNT(*)::int AS n FROM refresh_tokens WHERE family_id = $1',
+      [family]
+    );
+    return result.rows[0].n;
   } finally {
     await client.end().catch(() => {});
   }

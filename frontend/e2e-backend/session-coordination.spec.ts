@@ -35,13 +35,10 @@ import {
 const BASE = process.env.WHENTO_BASE_URL ?? 'http://127.0.0.1:8080';
 const API = process.env.WHENTO_API ?? 'http://127.0.0.1:5173/api/v1';
 /**
- * The disposable Postgres the PR stack is tested against. Token-row accounting reads
- * it directly; without `pg` installed the helper returns null and the request-level
- * bounds still carry the test.
+ * The current job's disposable Postgres. Missing configuration fails the database
+ * assertion; never silently fall back to a developer's unrelated database.
  */
-const DATABASE_URL =
-  process.env.WHENTO_DATABASE_URL ??
-  'postgres://whento:whento@127.0.0.1:55434/whento_pr7?sslmode=disable';
+const DATABASE_URL = process.env.WHENTO_DATABASE_URL ?? process.env.DATABASE_URL;
 
 interface Account {
   email: string;
@@ -92,6 +89,17 @@ async function storedTokenLikeValues(page: import('@playwright/test').Page): Pro
   });
 }
 
+async function readIdentity(page: import('@playwright/test').Page): Promise<string> {
+  return page.evaluate(async () => {
+    // The normal acceptance server is Vite. Reuse the running app's HTTP client,
+    // not a raw fetch with an independently chosen bearer token.
+    const modulePath = '/src/api/client.ts';
+    const { apiClient } = await import(modulePath);
+    const user = await apiClient.get('/auth/me');
+    return user.email;
+  });
+}
+
 test.describe('two-page session coordination', () => {
   test('acceptance 1: two dashboard tabs idle for 60s — zero auto reloads, bounded auth traffic, no token-row growth', async ({
     browser,
@@ -101,11 +109,12 @@ test.describe('two-page session coordination', () => {
     try {
       // Log in A on tab 1, then install the counters *before* the two explicit
       // dashboard navigations so every automatic reload would be counted.
-      await loginViaUI(pageA, BASE, accountA.email, accountA.password);
+      const loginCounter = await loginViaUI(pageA, BASE, accountA.email, accountA.password);
       const countA = installTrafficCounter(pageA);
       const countB = installTrafficCounter(pageB);
 
-      const rowsBefore = await countRefreshTokenRows(DATABASE_URL);
+      await expect.poll(() => loginCounter.capturedFamilies[0]).toBeTruthy();
+      const family = loginCounter.capturedFamilies[0];
 
       // The two explicit navigations: dashboard tab 1, dashboard tab 2.
       await openDashboard(pageA, BASE);
@@ -115,6 +124,8 @@ test.describe('two-page session coordination', () => {
       await wait(2000);
       const navA = countA.documentResponses;
       const navB = countB.documentResponses;
+      const rowsBefore = await countRefreshTokenRows(DATABASE_URL, family);
+      const refreshesBefore = countA.authRefresh + countB.authRefresh;
       await wait(60_000);
 
       // Each tab performed exactly its one explicit document load — zero automatic
@@ -130,13 +141,11 @@ test.describe('two-page session coordination', () => {
       expect(countA.authLogin + countB.authLogin).toBe(0);
       expect(countA.authRegister + countB.authRegister).toBe(0);
 
-      // Refresh rotation deliberately keeps the consumed row (for the grace window)
-      // and inserts its successor, so the table grows one row per refresh — never
-      // more. Growth beyond the observed refresh count would be a new login/session.
-      const rowsAfter = await countRefreshTokenRows(DATABASE_URL);
-      if (rowsBefore !== null && rowsAfter !== null) {
-        expect(rowsAfter - rowsBefore).toBeLessThanOrEqual(countA.authRefresh + countB.authRefresh);
-      }
+      // The normal-TTL session is not due during this idle minute. Neither cookie
+      // spending nor family-row growth is expected after initial restoration settles.
+      const rowsAfter = await countRefreshTokenRows(DATABASE_URL, family);
+      expect(rowsAfter).toBe(rowsBefore);
+      expect(countA.authRefresh + countB.authRefresh).toBe(refreshesBefore);
     } finally {
       await context.close();
     }
@@ -239,6 +248,79 @@ test.describe('two-page session coordination', () => {
       await openDashboard(pageB, BASE);
       await wait(1500);
       expect(countB.documentResponses).toBe(navB + 2);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test('acceptance 4c: a delayed valid A token cannot undo a B login without an intervening logout', async ({
+    browser,
+  }) => {
+    const { context, pageA, pageB } = await openTwoPages(browser);
+    try {
+      const countA = await loginViaUI(pageA, BASE, accountA.email, accountA.password);
+      const countB = installTrafficCounter(pageB);
+      await openDashboard(pageA, BASE);
+      await openDashboard(pageB, BASE);
+      await expect.poll(() => countA.capturedFamilies[0]).toBeTruthy();
+      await expect.poll(() => countB.capturedTokens[0]).toBeTruthy();
+      const oldFamily = countA.capturedFamilies[0];
+      const oldToken = countB.capturedTokens[0];
+      const navA = countA.documentResponses;
+      const navB = countB.documentResponses;
+
+      // A real successful login, through the app's normal action and cookie lock.
+      // Do NOT sign out first: that would only test the already-existing logout fence.
+      await pageA.evaluate(async credentials => {
+        const modulePath = '/src/stores/auth.ts';
+        const { useAuthStore } = await import(modulePath);
+        await useAuthStore().login(credentials);
+      }, accountB);
+      await expect.poll(() => readIdentity(pageA)).toBe(accountB.email);
+      await expect.poll(() => readIdentity(pageB)).toBe(accountB.email);
+
+      const oldIdentity = await fetch(`${API}/auth/me`, {
+        headers: { Authorization: `Bearer ${oldToken}` },
+      });
+      expect(oldIdentity.status).toBe(200); // A's old credential is genuinely still valid.
+      const tokensBefore = countB.capturedTokens.length;
+      await postChannel(pageA, {
+        type: 'token',
+        token: oldToken,
+        family: oldFamily,
+        expiresAt: Date.now() + 60_000,
+      });
+      await wait(300);
+      expect(await readIdentity(pageA)).toBe(accountB.email);
+      expect(await readIdentity(pageB)).toBe(accountB.email);
+      expect(countB.capturedTokens.slice(tokensBefore)).not.toContain(oldToken);
+      expect(countA.documentResponses).toBe(navA);
+      expect(countB.documentResponses).toBe(navB);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test('acceptance 5b: storage-only peers adopt B and clear A without storing credentials', async ({
+    browser,
+  }) => {
+    const { context, pageA, pageB } = await openTwoPages(browser);
+    try {
+      await pageB.addInitScript(() => {
+        Object.defineProperty(window, 'BroadcastChannel', { value: undefined });
+      });
+      await loginViaUI(pageA, BASE, accountA.email, accountA.password);
+      await openDashboard(pageB, BASE);
+      expect(await readIdentity(pageB)).toBe(accountA.email);
+      const counterB = installTrafficCounter(pageB);
+      await pageA.evaluate(async credentials => {
+        const modulePath = '/src/stores/auth.ts';
+        const { useAuthStore } = await import(modulePath);
+        await useAuthStore().login(credentials);
+      }, accountB);
+      await expect.poll(() => readIdentity(pageB)).toBe(accountB.email);
+      expect(counterB.documentResponses).toBe(0);
+      expect(await storedTokenLikeValues(pageB)).toBe(0);
     } finally {
       await context.close();
     }

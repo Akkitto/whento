@@ -30,8 +30,9 @@ import {
 const BASE = process.env.WHENTO_ROTATION_BASE_URL ?? 'http://127.0.0.1:5174';
 const API = process.env.WHENTO_ROTATION_API ?? 'http://127.0.0.1:5174/api/v1';
 const DATABASE_URL =
+  process.env.WHENTO_ROTATION_DATABASE_URL ??
   process.env.WHENTO_DATABASE_URL ??
-  'postgres://whento:whento@127.0.0.1:55434/whento_pr7?sslmode=disable';
+  process.env.DATABASE_URL;
 
 async function registerAccount(tag: string): Promise<{ email: string; password: string }> {
   const unique = `${tag}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
@@ -73,7 +74,13 @@ test.describe('two-page forced refresh (short-TTL backend)', () => {
       const loginFamily = countA.capturedFamilies[0];
       expect(loginFamily).toBeTruthy();
 
-      const rowsBefore = await countRefreshTokenRows(DATABASE_URL);
+      // Cold page loads may restore the cookie before the proactive timer is due.
+      // Exclude those responses so they cannot satisfy the rotation assertion.
+      await wait(2_000);
+      countA.capturedRefreshFamilies.length = 0;
+      countB.capturedRefreshFamilies.length = 0;
+      const rowsBefore = await countRefreshTokenRows(DATABASE_URL, loginFamily);
+      const refreshesBefore = countA.authRefresh + countB.authRefresh;
 
       // Wait for the proactive refresh: with the 2-minute TTL the client schedules it
       // at TTL - 60s = 60s. Bounded: the cookie lock lets one tab rotate, the other
@@ -95,7 +102,9 @@ test.describe('two-page forced refresh (short-TTL backend)', () => {
 
       // Bounded rotation: at most one cookie-spending refresh (or two if the second
       // tab's timer happened to fire first in the same window).
-      expect(countA.authRefresh + countB.authRefresh).toBeLessThanOrEqual(2);
+      const rotations = countA.authRefresh + countB.authRefresh - refreshesBefore;
+      expect(rotations).toBeGreaterThan(0);
+      expect(rotations).toBeLessThanOrEqual(2);
 
       // No document reloads and no account-store reset: if either tab had treated the
       // rotated token as a new session it would have re-run /auth/me and reloaded.
@@ -103,11 +112,10 @@ test.describe('two-page forced refresh (short-TTL backend)', () => {
       expect(countB.documentResponses).toBe(navB);
       expect(countA.authMe + countB.authMe).toBeLessThanOrEqual(4);
 
-      // No token-row growth from the rotation.
-      const rowsAfter = await countRefreshTokenRows(DATABASE_URL);
-      if (rowsBefore !== null && rowsAfter !== null) {
-        expect(rowsAfter).toBe(rowsBefore);
-      }
+      // Each observed rotation retains its consumed ancestor and inserts a
+      // successor. Only unexplained growth is a session-minting regression.
+      const rowsAfter = await countRefreshTokenRows(DATABASE_URL, loginFamily);
+      expect(rowsAfter - rowsBefore).toBe(rotations);
 
       // Acceptance 7: a brand-new login is a brand-new family.
       const other = await registerAccount('rot-b');

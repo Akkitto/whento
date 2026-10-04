@@ -474,7 +474,7 @@ jobs:
     # Two health waits of 60 x 2s, plus install and build. Without this the job's ceiling
     # was the six-hour default.
     timeout-minutes: 30
-    needs: [generate-swagger]
+    needs: [generate-swagger, build-frontend]
     services:
       postgres:
         image: postgres:16
@@ -504,6 +504,9 @@ jobs:
       REDIS_URL: redis://localhost:6379
       # Synthetic operator key shared by the fresh backend and its E2E seeder.
       BOOTSTRAP_KEY: ci-only-bootstrap-key-not-for-production
+      APP_URL: http://127.0.0.1:8080
+      WHENTO_ROTATION_BASE_URL: http://127.0.0.1:5174
+      WHENTO_ROTATION_API: http://127.0.0.1:5174/api/v1
       # The limiter allows 3 registrations and 60 availability writes per minute per IP.
       # A suite driving a real calendar from one address is exactly the traffic it exists
       # to refuse, so it is turned off for the run rather than paced around.
@@ -562,16 +565,20 @@ jobs:
       - name: Generate JWT keys
         run: ./scripts/generate-keys.sh
 
+      - name: Download frontend build for the rotation backend
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: frontend-dist
+          path: web/dist
+
       # Built as its own step rather than left to `go run` in the background, so a
       # compile or link failure reports itself instead of surfacing later as "the
       # backend did not become healthy".
       #
-      # ensure-dist-placeholder must come first: web/embed.go resolves its //go:embed
-      # at compile time and will not build against an empty web/dist. The browser
-      # tests are served by Vite, so a placeholder is all this needs.
+      # Embed the real build: the normal suite uses Vite, while the separate
+      # short-TTL backend serves its own production frontend on port 5174.
       - name: Build backend
         run: |
-          make ensure-dist-placeholder
           go build -tags selfhosted -o /tmp/whento ./cmd/
 
       # Both servers are started detached with nohup, and each step waits for its own
@@ -597,6 +604,24 @@ jobs:
           done
           echo "backend did not become healthy; log follows"
           cat /tmp/backend.log
+          exit 1
+
+      - name: Start short-TTL rotation backend
+        run: |
+          PORT=5174 JWT_ACCESS_EXPIRY=2m APP_URL=http://127.0.0.1:5174 \
+            nohup /tmp/whento > /tmp/rotation-backend.log 2>&1 &
+          echo $! > /tmp/rotation-backend.pid
+          for _ in $(seq 1 60); do
+            if ! kill -0 "$(cat /tmp/rotation-backend.pid)" 2>/dev/null; then
+              cat /tmp/rotation-backend.log
+              exit 1
+            fi
+            if curl -sf http://127.0.0.1:5174/api/health > /dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          cat /tmp/rotation-backend.log
           exit 1
 
       - name: Start frontend
@@ -629,6 +654,16 @@ jobs:
         run: |
           echo "===== backend ====="; tail -100 /tmp/backend.log || true
           echo "===== frontend ====="; tail -50 /tmp/frontend.log || true
+          echo "===== rotation backend ====="; tail -100 /tmp/rotation-backend.log || true
+
+      - name: Stop E2E servers
+        if: always()
+        run: |
+          for file in /tmp/backend.pid /tmp/rotation-backend.pid /tmp/frontend.pid; do
+            if [ -f "$file" ]; then
+              kill "$(cat "$file")" 2>/dev/null || true
+            fi
+          done
 
       - name: Upload failure artefacts
         if: failure()
