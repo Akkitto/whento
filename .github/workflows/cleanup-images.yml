@@ -61,7 +61,8 @@ jobs:
   # PR<n> tag was ever pushed. The job is skipped rather than left to fail.
   close:
     name: Remove this pull request's image
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    # Fork publication infrastructure does not authorize deleting existing images.
+    if: github.repository == 'When-To/whento' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -133,7 +134,8 @@ jobs:
 
   cleanup:
     name: Remove images for long-closed pull requests
-    if: github.event_name != 'pull_request'
+    # The inherited weekly sweep must not delete images in the publishing fork.
+    if: github.repository == 'When-To/whento' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:

@@ -8,6 +8,8 @@ not an upstream change and not a ninth PR in the series.
 1. In the fork's **Actions** tab, enable Actions if GitHub has disabled them on
    the fork. Keep unrelated inherited workflows disabled if they were disabled;
    in particular, enabling all inherited schedules could activate image cleanup.
+   The installed fork-main copy additionally guards both inherited cleanup jobs
+   as upstream-only, so this setup cannot delete your fork's container images.
 2. Create a fine-grained personal access token restricted to **Akkitto/whento
    only**, with repository **Contents: Read and write** and **Workflows: Read and
    write**. Metadata read is implicit. No upstream access or pull-request write
