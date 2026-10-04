@@ -529,6 +529,8 @@ jobs:
     env:
       DATABASE_URL: postgres://test:test@localhost:5432/whento_e2e?sslmode=disable
       REDIS_URL: redis://localhost:6379
+      # Synthetic operator key shared by the fresh backend and its E2E seeder.
+      BOOTSTRAP_KEY: ci-only-bootstrap-key-not-for-production
       # The limiter allows 3 registrations and 60 availability writes per minute per IP.
       # A suite driving a real calendar from one address is exactly the traffic it exists
       # to refuse, so it is turned off for the run rather than paced around.
