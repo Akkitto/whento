@@ -110,7 +110,8 @@ PORT=5174 JWT_ACCESS_EXPIRY=2m APP_URL=http://127.0.0.1:5174 \
 pids+=("$!")
 (
   cd frontend
-  exec npm run dev:selfhosted
+  # Track Vite itself, not npm's wrapper, so cleanup stops the actual server.
+  VITE_BUILD_TYPE=selfhosted exec ./node_modules/.bin/vite --host 127.0.0.1
 ) > "$task_tmp/frontend.log" 2>&1 &
 pids+=("$!")
 wait_healthy() {
