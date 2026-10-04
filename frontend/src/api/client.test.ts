@@ -186,6 +186,28 @@ describe('apiClient', () => {
   });
 
   describe('tokens', () => {
+    it.each([
+      '/auth/login',
+      '/auth/register',
+      '/auth/bootstrap',
+      '/auth/mfa/verify',
+      '/auth/passkey/login/finish',
+      '/auth/magic-link/verify',
+      '/auth/reset-password',
+    ])('installs finalized %s credentials before releasing the cookie lock', async path => {
+      const lock = vi.fn(async (_name: string, operation: () => Promise<unknown>) => {
+        const result = await operation();
+        expect(apiClient.getFamilyId()).toBe('family-finalized');
+        return result;
+      });
+      vi.stubGlobal('navigator', { ...navigator, locks: { request: lock } });
+      withAdapter(() =>
+        ok({ access_token: 'finalized-token', expires_in: 900, session_id: 'family-finalized' })
+      );
+      await apiClient.post(path, {});
+      expect(lock).toHaveBeenCalledTimes(1);
+    });
+
     it('keeps the access token out of storage entirely', () => {
       apiClient.setToken('a-token');
 
@@ -357,6 +379,108 @@ describe('apiClient', () => {
   });
 
   describe('cross-tab session restoration', () => {
+    it('rejects delayed tokens after a local A-to-B replacement without logout', async () => {
+      vi.spyOn(BroadcastChannel.prototype, 'postMessage').mockImplementation(() => {});
+      const tab = new ApiClient();
+      live.push(tab);
+      tab.setToken('a-token', 900, 'family-a');
+      tab.setToken('b-token', 900, 'family-b');
+      channelHandler(tab)?.({
+        data: {
+          type: 'token',
+          token: 'late-a',
+          expiresAt: Date.now() + 900_000,
+          family: 'family-a',
+        },
+      } as MessageEvent);
+
+      expect(tab.getFamilyId()).toBe('family-b');
+      const seen: string[] = [];
+      instanceOf(tab).defaults.adapter = async config => {
+        seen.push(String(config.headers.Authorization));
+        return {
+          data: { success: true, data: {} },
+          status: 200,
+          statusText: 'OK',
+          headers: {},
+          config,
+        };
+      };
+      await tab.get('/auth/me');
+      expect(seen).toEqual(['Bearer b-token']);
+    });
+
+    it('rejects a delayed old family in a cold tab that only observed the latest login', () => {
+      vi.spyOn(BroadcastChannel.prototype, 'postMessage').mockImplementation(() => {});
+      const sender = new ApiClient();
+      const cold = new ApiClient();
+      live.push(sender, cold);
+      sender.setToken('b-token', 900, 'family-b');
+      channelHandler(cold)?.({
+        data: {
+          type: 'token',
+          token: 'late-a',
+          expiresAt: Date.now() + 900_000,
+          family: 'family-a',
+        },
+      } as MessageEvent);
+      expect(cold.getFamilyId()).toBeNull();
+      channelHandler(cold)?.({
+        data: {
+          type: 'token',
+          token: 'b-token',
+          expiresAt: Date.now() + 900_000,
+          family: 'family-b',
+        },
+      } as MessageEvent);
+      expect(cold.getFamilyId()).toBe('family-b');
+    });
+
+    it('fences the old account through storage when BroadcastChannel is unavailable', () => {
+      vi.stubGlobal('BroadcastChannel', undefined);
+      const tab = new ApiClient();
+      live.push(tab);
+      tab.setToken('a-token', 900, 'family-a');
+      const listener = vi.fn();
+      window.addEventListener('whento:remote-session', listener);
+      try {
+        localStorage.setItem('whento.activeFamily', 'family-b');
+        window.dispatchEvent(
+          new StorageEvent('storage', {
+            key: 'whento.activeFamily',
+            oldValue: 'family-a',
+            newValue: 'family-b',
+          })
+        );
+        expect(tab.getFamilyId()).toBe('family-b');
+        expect((tab as unknown as { accessToken: string | null }).accessToken).toBeNull();
+        expect(tab.hasSession()).toBe(true);
+        expect(listener).toHaveBeenCalledTimes(1);
+      } finally {
+        window.removeEventListener('whento:remote-session', listener);
+      }
+    });
+
+    it('retains the replacement fence in memory when storage is denied', () => {
+      vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+        throw new Error('denied');
+      });
+      vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+        throw new Error('denied');
+      });
+      vi.spyOn(BroadcastChannel.prototype, 'postMessage').mockImplementation(() => {});
+      const tab = new ApiClient();
+      live.push(tab);
+      tab.setToken('a-token', 900, 'family-a');
+      channelHandler(tab)?.({
+        data: { type: 'token', token: 'b-token', expiresAt: null, family: 'family-b' },
+      } as MessageEvent);
+      channelHandler(tab)?.({
+        data: { type: 'token', token: 'late-a', expiresAt: null, family: 'family-a' },
+      } as MessageEvent);
+      expect(tab.getFamilyId()).toBe('family-b');
+    });
+
     it('raises the session-restored event when a fresh-session token is accepted', () => {
       const events: string[] = [];
       const listener = (event: Event) => events.push(event.type);
@@ -398,7 +522,7 @@ describe('apiClient', () => {
       }
     });
 
-    it('does not raise the event for a same-session token that carries no family', () => {
+    it('ignores an unidentified peer token once the current server family is known', () => {
       const events: string[] = [];
       const listener = (event: Event) => events.push(event.type);
       window.addEventListener('whento:remote-session', listener);
@@ -411,7 +535,7 @@ describe('apiClient', () => {
 
         expect(events).toEqual([]);
         expect((apiClient as unknown as { accessToken: string | null }).accessToken).toBe(
-          'a-token-refreshed'
+          'a-token'
         );
       } finally {
         window.removeEventListener('whento:remote-session', listener);
@@ -514,6 +638,7 @@ describe('apiClient', () => {
         api.setToken('a-token', undefined, 'family-a');
         const genBefore = (api as unknown as { sessionGeneration: number }).sessionGeneration;
 
+        localStorage.setItem('whento.activeFamily', 'family-b');
         const onMessage = channelHandler(api);
         onMessage?.({
           data: { type: 'token', token: 'b-token', expiresAt: null, family: 'family-b' },
