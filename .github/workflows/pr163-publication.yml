@@ -1,0 +1,129 @@
+name: PR163 focused branch publication
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17,47 * * * *'
+
+# No upstream PR events, PR writes, package writes, or automatic merges.
+permissions:
+  contents: read
+
+concurrency:
+  group: pr163-publication
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    if: github.repository == 'Akkitto/whento' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      ready: ${{ steps.plan.outputs.ready }}
+      configured: ${{ steps.configuration.outputs.configured }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Test the trusted publication helper
+        run: python3 -m unittest discover -s .github/pr163-publication -v
+      - name: Check configuration without exposing the credential
+        id: configuration
+        env:
+          CONFIGURED: ${{ secrets.WHENTO_PR163_PUBLISH_TOKEN != '' }}
+        run: echo "configured=$CONFIGURED" >> "$GITHUB_OUTPUT"
+      - name: Read upstream merge state
+        id: plan
+        env:
+          PUBLISH_TOKEN_CONFIGURED: ${{ steps.configuration.outputs.configured }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/publication"
+          python3 .github/pr163-publication/publication.py plan \
+            --plan "$RUNNER_TEMP/publication/plan.json" --summary "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: publication-plan
+          path: ${{ runner.temp }}/publication/plan.json
+          retention-days: 1
+          if-no-files-found: error
+
+  verify:
+    needs: plan
+    if: needs.plan.outputs.ready == 'true' && needs.plan.outputs.configured == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 5
+      redis:
+        image: redis:7
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 10s
+          --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: publication-plan
+          path: ${{ runner.temp }}/publication
+      - name: Replay only the owning topic on current upstream
+        run: |
+          PR163_REPLAY_REPO="$PWD" python3 -m unittest discover -s .github/pr163-publication -v
+          python3 .github/pr163-publication/publication.py prepare \
+            --plan "$RUNNER_TEMP/publication/plan.json" --directory "$RUNNER_TEMP/candidate"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.27'
+          check-latest: true
+          cache: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '24'
+      - name: Install test clients
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client shellcheck ripgrep
+      - name: Verify candidate without any publication credential
+        run: bash .github/pr163-publication/verify.sh "$RUNNER_TEMP/candidate"
+      - name: Package the tested commit only
+        run: |
+          python3 .github/pr163-publication/publication.py package \
+            --plan "$RUNNER_TEMP/publication/plan.json" --directory "$RUNNER_TEMP/candidate"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: verified-candidate
+          path: |
+            ${{ runner.temp }}/publication/plan.json
+            ${{ runner.temp }}/publication/candidate.bundle
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    needs: [plan, verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # This job executes trusted fork-main code, NEVER candidate application code.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: verified-candidate
+          path: ${{ runner.temp }}/publication
+      - name: Recheck live state and create a new fork branch
+        env:
+          PUBLISH_TOKEN: ${{ secrets.WHENTO_PR163_PUBLISH_TOKEN }}
+        run: |
+          python3 .github/pr163-publication/publication.py publish \
+            --plan "$RUNNER_TEMP/publication/plan.json" --directory "$RUNNER_TEMP/publication"

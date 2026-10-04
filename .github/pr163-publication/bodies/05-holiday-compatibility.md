@@ -1,0 +1,16 @@
+# fix(availability): preserve holiday compatibility with offline coverage
+
+Related to #163; focused PR 5 of 8. Submit after durable reminders is merged.
+
+## Summary
+
+- Provide a bundled 44-country offline holiday dataset with bounded/cached Nager fallback outside bundled coverage.
+- Preserve `ignoreHolidays` behavior and fail open for unknown country/year data or provider failure.
+- Expose supported-country/coverage metadata and holiday API routes without replacing upstream migration history.
+- Cover observed public holidays independently of ordinary weekday restrictions; both July 3 and July 4 are checked with holiday enforcement on/off, plus an ordinary allowed Friday.
+
+## Verification
+
+Own-branch Go 1.27.1 race tests pass for both modules and both build variants. Frontend checks and all 758 unit tests pass. The cold-process country-copy race regression and observed-day positive/negative controls pass; route and limiter contracts include the new endpoints.
+
+No schema migration. Bundled coverage is not universal; unknown coverage is disclosed rather than silently blocking dates. The client holiday library is lazy-loaded, but its approximately 1.42 MB minified vendor chunk remains a disclosed size cost, not a claimed tiny bundle.

@@ -1,0 +1,84 @@
+# Fork-only PR163 publication
+
+Installed only on `Akkitto/whento` default `main`. This is fork infrastructure,
+not an upstream change and not a ninth PR in the series.
+
+## One-time activation
+
+1. In the fork's **Actions** tab, enable Actions if GitHub has disabled them on
+   the fork. Keep unrelated inherited workflows disabled if they were disabled;
+   in particular, enabling all inherited schedules could activate image cleanup.
+2. Create a fine-grained personal access token restricted to **Akkitto/whento
+   only**, with repository **Contents: Read and write** and **Workflows: Read and
+   write**. Metadata read is implicit. No upstream access or pull-request write
+   permission is needed. Choose an expiry that covers the PR series.
+3. Add it under the fork's **Settings → Secrets and variables → Actions** as
+   `WHENTO_PR163_PUBLISH_TOKEN`. Never paste the value in chat, a commit, or a PR.
+4. Enable **PR163 focused branch publication** and use **Run workflow** on `main`
+   once. Read its summary to confirm the plan and configuration. Configure GitHub
+   Actions failure notifications so a genuine conflict or expired token is seen.
+
+The built-in `GITHUB_TOKEN` cannot authorize creating/modifying workflow files;
+some frozen topics legitimately change `.github/workflows/ci.yml`. The separate,
+fork-scoped token is therefore required. It appears only in the final write job,
+which never executes candidate application code.
+
+## What happens
+
+- The first two main-based branches already exist; open their PRs using the
+  status summary links. Never open duplicates for their source copies.
+- At minutes 17 and 47 each hour, read actual upstream PR merge state, including
+  squash merges. GitHub can delay scheduled runs; this is not a timing guarantee.
+- For topic 3–8, wait for its immediately preceding topic to merge into upstream
+  `main`. PR 1 is independent. Replay **only that topic's owning patch**, preserving
+  upstream notes in the Unreleased Changelog. Produce one Conventional Commit on
+  the verified current upstream main, not a cumulative PR.
+- Reconcile only the known additive `.PHONY` target-name declaration overlap
+  between CI/Compose and bootstrap. Never restore upstream-deleted target names;
+  actual Makefile recipe conflicts fail closed like other code conflicts.
+- Verify both Go workspace modules/builds with database-backed race tests,
+  coverage floors, Go formatting/lint and builds; frontend API types, formatting, lint, type
+  checks, coverage, four shuffle seeds, both builds; both browser suites against
+  disposable services, including the short-TTL session server when applicable;
+  the migration acceptance suite when present; all three Docker build paths and
+  Compose parsing after the independent CI/Compose PR is present.
+- Repeat merge/ref checks after testing. Create the missing
+  `codex/pr163-submit-<topic>` branch only. An empty creation lease makes even an
+  intervening owner-created branch impossible to overwrite.
+- The publish job summary provides the ready-to-open PR link and verification
+  run. You review the form and click **Create pull request**. Nothing creates,
+  closes, merges, comments on, or edits an upstream PR for you.
+
+## Fail-closed conditions and limits
+
+API/network errors, closed-unmerged PRs, changed frozen source tips, patch
+conflicts, missing prerequisites, missing credentials, changed upstream main,
+failing tests, unrelated candidate files, and pre-existing destinations never
+authorize an overwrite or a publication. Re-run after transient failures; real
+conflicts require an explicit code review, not automatic ours/theirs resolution.
+An already published/open PR is intentionally not rebased by this workflow.
+If upstream requires changes to that PR, they remain a separately reviewed task.
+
+Source branches stay untouched. Submission branches are created one at a time as
+prerequisites merge. No force-update of an existing branch is possible. Disable
+this workflow and revoke its token after all eight PRs merge. GitHub can disable
+inactive repository schedules after 60 days; re-enable if the series takes that
+long. Do not interpret installing workflow code as proof that GitHub has enabled
+it or that a token is configured.
+
+## Local verification
+
+```sh
+python3 -m unittest discover -s .github/pr163-publication -v
+PR163_REPLAY_REPO="$PWD" python3 -m unittest discover -s .github/pr163-publication -v
+actionlint .github/workflows/pr163-publication.yml
+shellcheck .github/pr163-publication/askpass.sh .github/pr163-publication/verify.sh
+```
+
+The optional replay test needs all frozen topic objects locally. It simulates
+each prerequisite being squash-merged, adds a separate upstream Changelog note,
+tests both with and without CI/Compose merged, and checks every candidate's parent,
+owning file list, audited source contents (ignoring `.PHONY` name order only),
+and bundle. Fixtures use private temporary repositories and never push remotely.
+The real application gate deliberately refuses to run outside GitHub Actions to
+avoid mistaking an operator's database for disposable test infrastructure.
