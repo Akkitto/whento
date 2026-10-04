@@ -68,9 +68,22 @@ describe('applySmtpProbeToConfig', () => {
     }
   });
 
-  it('disables the email channel only on a confirmed unavailable answer', () => {
-    const next = applySmtpProbeToConfig(savedConfig(), 'unavailable');
-    expect(next.channels.email.enabled).toBe(false);
+  it('preserves saved email intent when only another setting changes during an SMTP outage', () => {
+    const saved = savedConfig();
+    const edited = { ...saved, reminders: { ...saved.reminders, hours_before: 48 } };
+    const next = applySmtpProbeToConfig(edited, 'unavailable');
+    expect(next.channels.email.enabled).toBe(true);
+    expect(next.reminders.hours_before).toBe(48);
+    expect(applySmtpProbeToConfig(next, 'available').channels.email.enabled).toBe(true);
+    expect(saved.reminders.hours_before).toBe(24);
+  });
+
+  it('preserves an explicit owner edit to disable email on every capability outcome', () => {
+    const edited = savedConfig();
+    edited.channels.email.enabled = false;
+    for (const state of ['unknown', 'available', 'unavailable', 'error'] as const) {
+      expect(applySmtpProbeToConfig(edited, state).channels.email.enabled).toBe(false);
+    }
   });
 
   it('does not touch any other channel on any outcome', () => {

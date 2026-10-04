@@ -11,18 +11,18 @@ import type { NotifyConfig } from '@/api/notify';
 
 /**
  * The SMTP capability probe is deliberately not a boolean. Whether the email
- * channel can ever be delivered is a three-valued question, and two of those
- * values must not touch the owner's saved email.enabled setting:
+ * channel can currently be delivered is separate from the owner's saved
+ * email.enabled setting. None of these states rewrites that setting:
  *
  * - `available` — the instance has SMTP; the email channel may be offered.
- * - `unavailable` — the instance has no SMTP; the email channel must not be
- *   offered, and persisting it disabled is truthful.
+ * - `unavailable` — the instance has no SMTP; newly enabling email is not
+ *   offered. Existing saved intent survives until SMTP is restored.
  * - `error` — the probe itself failed. That is a retryable warning, never a
  *   reason to destroy a saved email.enabled flag.
  * - `unknown` — the probe has not answered yet (still in flight, or never run).
  *
- * Only a confirmed `unavailable` answer may rewrite email.enabled, because only
- * that case knows for certain the mailbox could never receive mail.
+ * Capability never rewrites saved consent. Only an explicit owner edit changes
+ * email.enabled; the backend gates enqueueing and delivery on SMTP availability.
  */
 export type SmtpProbeState = 'unknown' | 'available' | 'unavailable' | 'error';
 
@@ -48,20 +48,16 @@ export function useSmtpProbe() {
 
 /**
  * Returns the config that should actually be persisted for the given probe
- * outcome. Only confirmed `unavailable` forces the email channel off; `unknown`
- * and `error` preserve whatever the owner saved, so a failed probe — or an
- * unrelated settings save — cannot silently clobber email.enabled.
+ * outcome. All capability outcomes preserve the owner's edit, so an unrelated
+ * settings save cannot silently clobber email.enabled during an SMTP outage.
  */
 export function applySmtpProbeToConfig(
   config: NotifyConfig,
-  probeState: SmtpProbeState
+  _probeState: SmtpProbeState
 ): NotifyConfig {
   const next: NotifyConfig = {
     ...config,
     channels: { ...config.channels, email: { ...config.channels.email } },
   };
-  if (probeState === 'unavailable') {
-    next.channels.email.enabled = false;
-  }
   return next;
 }
