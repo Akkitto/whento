@@ -88,12 +88,19 @@ func TestUSObservedSubstituteDayBlocks(t *testing.T) {
 
 	friday := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)   // observed
 	saturday := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC) // civil
-	wednesdayOnly := []int{int(time.Wednesday)}
+	weekdays := []int{int(time.Friday), int(time.Saturday)}
 
 	for _, day := range []time.Time{friday, saturday} {
-		if IsDateAllowed(day, "America/New_York", wednesdayOnly, "block", false) {
+		if !IsDateAllowed(day, "America/New_York", weekdays, "ignore", false) {
+			t.Fatalf("US %s is not admitted by the weekday baseline", day.Format("2006-01-02"))
+		}
+		if IsDateAllowed(day, "America/New_York", weekdays, "block", false) {
 			t.Errorf("US %s admitted under block (should be a blocked holiday)", day.Format("2006-01-02"))
 		}
+	}
+	ordinaryFriday := friday.AddDate(0, 0, 7)
+	if !IsDateAllowed(ordinaryFriday, "America/New_York", weekdays, "block", false) {
+		t.Error("ordinary Friday refused under block")
 	}
 }
 
