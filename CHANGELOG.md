@@ -74,12 +74,13 @@ line per release rather than listed individually.
 - **Reminder delivery is a durable, fenced queue.** Reminders are persisted in
   a `reminder_jobs` table (migration `020`) and delivered by a scheduler loop:
   each job is claimed atomically under a per-acquisition UUID claim token and a
-  lease (`FOR UPDATE SKIP LOCKED`), so several instances — or one instance
-  claiming twice across a lease expiry — can never double-deliver. Every worker
-  side-effect is fenced by its token: a late worker's failure report on a job
+  lease (`FOR UPDATE SKIP LOCKED`), so only one worker owns an unexpired claim.
+  Every queue-state transition is fenced by its token: a late worker's failure report on a job
   somebody else already sent is a recognizable no-op, and a `sent` row can never
   be rewritten. Delivery is retried with exponential backoff and permanently
-  fails after `max_attempts`.
+  fails after `max_attempts`. External delivery remains at least once: a crash
+  after a provider accepts a send but before completion is recorded can cause a
+  retry; exactly-once delivery is not promised.
 - **Reminder deadlines are calendar-local.** The scheduler enumerates candidate
   event dates in the calendar's own IANA timezone (never a fixed UTC window), so
   a calendar east of UTC does not lose the day its event lands on, and DST
@@ -96,10 +97,11 @@ line per release rather than listed individually.
   the calendar's full consent configuration *and* SMTP, verified again at
   delivery time, and the participant-email endpoints refuse when the email
   channel is off, participant delivery is off, or SMTP is absent.
-- **The frontend SMTP capability probe is tri-state.** Instead of a boolean
+- **The frontend SMTP probe preserves saved owner intent.** Instead of a boolean
   that defaults to “available”, the probe is `unknown | available | unavailable
-  | error`: a failed probe shows a retryable warning and never rewrites the
-  saved `email.enabled`.
+  | error`: a failed probe shows a retryable warning. Neither a failed probe nor
+  unavailable SMTP rewrites saved `email.enabled`; only an explicit owner edit
+  changes that preference. Capability still gates delivery and new enablement.
 
 ### Added
 
