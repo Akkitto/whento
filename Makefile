@@ -120,9 +120,9 @@ dev-frontend:
 # web/dist (frontend placeholder suffices) and imports the generated docs/swagger, and
 # without either, `go test ./...` will not even compile. CI manufactures both as
 # uploaded artifacts; the local command has to make its own.
-test: ensure-dist-placeholder swagger-generate-if-missing test-root test-pkg
+test: test-root test-pkg
 
-test-root:
+test-root: ensure-dist-placeholder swagger-generate-if-missing
 	@echo "Running root module tests ($(BUILD_TYPE) mode)..."
 	go test -tags $(BUILD_TYPE) ./... -v
 
