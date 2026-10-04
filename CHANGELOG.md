@@ -178,11 +178,12 @@ line per release rather than listed individually.
   (explicit `DATABASE_URL` wins over `DB_*`; otherwise built from `DB_*` with
   percent-encoded credentials, port and sslmode), assembles the chain into its
   own `mktemp` scratch directory and deletes only that directory on success,
-  failure and signals — never the shared `./migrations-build`. `reset` and
-  `down` are destructive and require explicit consent: interactive (type the
+  failure and signals — never the shared `./migrations-build`. `reset` requires
+  explicit database confirmation: interactive (type the
   exact connected database name, shown redacted with its identity) or
   non-interactive `--yes --confirm-database <exact-name>` that must equal
-  `current_database()`. A reset on an instance that was never initialized
+  `current_database()`. Explicit `down [N]` is destructive and does not prompt.
+  A reset on an instance that was never initialized
   skips `down -all`; a failed `down` stops before any `up`; `status` reports a
   genuine "no migration applied" separately from real errors. `init-db.sh`
   never resets just because tables exist — it applies pending `up` migrations,
