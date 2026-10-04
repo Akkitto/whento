@@ -183,12 +183,19 @@ import { useToastStore } from '@/stores/toast';
 import { adminApi } from '@/api/admin';
 import type { CalendarWithParticipants } from '@/types';
 import { translateErrorMessage } from '@/utils/errorTranslator';
+import { useAccountScopedReload } from '@/composables/useAccountScopedReload';
 
 const { t } = useI18n();
 const router = useRouter();
 const route = useRoute();
 const authStore = useAuthStore();
 const toastStore = useToastStore();
+
+// A remote account replacement advances the account generation, not a document
+// reload; this admin listing is account-scoped, so reload it in place.
+useAccountScopedReload(() => {
+  void loadCalendars();
+});
 
 const loading = ref(true);
 const calendars = ref<CalendarWithParticipants[]>([]);
