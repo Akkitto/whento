@@ -420,16 +420,6 @@ useAccountScopedReload(() => {
   });
 });
 
-// A remote account replacement (or a refresh that discovered a different server
-// family) advances the local account generation; reload this account's own data
-// instead of letting the whole document reload (the behaviour this PR removes).
-useAccountScopedReload(() => {
-  void loadCalendars();
-  void unifiedFeedStore.fetchConfig().catch(() => {
-    toastStore.error(unifiedFeedStore.error ?? t('errors.unexpected'));
-  });
-});
-
 const user = computed(() => authStore.user);
 const calendars = computed(() => {
   const cals = calendarStore.calendars;
