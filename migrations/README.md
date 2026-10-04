@@ -93,21 +93,43 @@ migrate create -ext sql -dir migrations/selfhosted -seq migration_name
 > into a build, so a number may be reused between `cloud/` and `selfhosted/` — `005` and
 > `013` both are. It must stay unique against `common/`.
 
-The latest common migration is `020`, so **the next common migration is `021`**. (`013` is
-taken by the two per-variant drop migrations; `014`–`020` are common.)
+## Choosing the next migration number
+
+Never hard-code "the next version" by hand: compute it from the actual assembled
+chain, so the answer stays correct as the inventory grows.
+
+```bash
+# Highest number across common + the variant you are adding to.
+next_migration_num() {
+    find migrations/common migrations/selfhosted migrations/cloud \
+        -name '*.sql' -printf '%f\n' 2>/dev/null \
+        | sed -E 's/^([0-9]+).*/\1/' \
+        | sort -n | tail -1
+}
+echo "Next free version: $(( $(next_migration_num) + 1 ))"
+```
+`scripts/migrate.sh create <variant> <name>` also picks the next number for you
+(via golang-migrate's `-seq`), so in practice the manual check above is just a
+sanity read for reviews.
+
+> These numbers apply to **this repository's chain**. The fork that preceded this
+> split used its own renumbered history; do not copy fork numbers into this
+> README or expect them to match upstream's published chain.
 
 ## Testing
 
-Test the build script manually:
+Test the build script manually (it refuses to write into a non-empty directory;
+use a fresh scratch dir):
 
 ```bash
-# Test cloud build
-bash scripts/build-migrations.sh cloud /tmp/test-cloud
+# Test cloud build into a fresh scratch dir
+scratch=$(mktemp -d)
+bash scripts/build-migrations.sh cloud "$scratch"
 
-# Test selfhosted build
-bash scripts/build-migrations.sh selfhosted /tmp/test-selfhosted
-
-# Check output
-ls -la /tmp/test-cloud
-ls -la /tmp/test-selfhosted
+# Test selfhosted build into another fresh scratch dir
+scratch2=$(mktemp -d)
+bash scripts/build-migrations.sh selfhosted "$scratch2"
 ```
+The safe path to actually apply (or reset) migrations is the guarded wrapper:
+`scripts/migrate.sh up|status|down|reset` (see its `--help`), which owns its own
+scratch directory and requires explicit consent for `reset`/`down`.
