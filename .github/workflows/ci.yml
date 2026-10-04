@@ -369,6 +369,14 @@ jobs:
           DATABASE_URL: postgres://test:test@localhost:5432/whento_test?sslmode=disable
         run: make migrate-up BUILD_TYPE=selfhosted
 
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Migration wrapper and both-variant upgrade acceptance
+        env:
+          DISPOSABLE_DB_URL: postgres://test:test@localhost:5432/whento_test?sslmode=disable
+        run: bash scripts/test-migrations.sh
+
       - name: Run tests with coverage
         env:
           DATABASE_URL: postgres://test:test@localhost:5432/whento_test?sslmode=disable
