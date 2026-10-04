@@ -373,7 +373,16 @@ export class ApiClient {
     this.expiresAt = expiresAtMs;
     const delay = Math.max(expiresAtMs - Date.now() - REFRESH_LEAD_MS, MIN_REFRESH_DELAY_MS);
 
-    this.refreshTimer = setTimeout(() => this.refreshIfDue(), delay);
+    this.refreshTimer = setTimeout(() => {
+      this.refreshTimer = null;
+      // Browser timer rounding may wake us just before the lead window. Do not
+      // lose proactive refresh permanently after that harmless early callback.
+      if (this.expiresAt !== null && this.expiresAt - Date.now() > REFRESH_LEAD_MS) {
+        this.scheduleRefreshAt(this.expiresAt);
+        return;
+      }
+      this.refreshIfDue();
+    }, delay);
   }
 
   private setSessionFlag() {

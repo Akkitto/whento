@@ -8,12 +8,14 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
-import { flushPromises } from '@vue/test-utils';
+import { enableAutoUnmount, flushPromises } from '@vue/test-utils';
 import { nextTick } from 'vue';
 import { bumpAccountGeneration } from '@/accountFence';
 import type { CalendarWithParticipants, User } from '@/types';
 
 import { mountWithI18n } from '@/test/harness';
+
+enableAutoUnmount(afterEach);
 
 const routerPush = vi.fn();
 
