@@ -24,6 +24,12 @@ on:
   pull_request:
   push:
     branches: [main]
+    # Fork-only publication infrastructure has its own isolated verification
+    # workflow. Do not build/publish unrelated application images for its edits.
+    # Pull-request and application-changing push checks remain unfiltered.
+    paths-ignore:
+      - '.github/pr163-publication/**'
+      - '.github/workflows/pr163-publication.yml'
 
 # Least privilege for every job; the two that need more raise it themselves.
 permissions:
