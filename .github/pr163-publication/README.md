@@ -31,6 +31,12 @@ which never executes candidate application code.
   status summary links. Never open duplicates for their source copies.
 - At minutes 17 and 47 each hour, read actual upstream PR merge state, including
   squash merges. GitHub can delay scheduled runs; this is not a timing guarantee.
+- A publication-helper/workflow update pushed to fork `main` also starts the same
+  `plan → verify → publish` path immediately. This removes the need to manually
+  start a run after reviewed source-pin repairs. Application CI skips only these
+  publication-only main pushes; all application-changing pushes, PR checks, and
+  security scans remain enabled. Do not use `[skip ci]` on a refresh intended to
+  start this push-triggered publication. Manual and scheduled runs remain available.
 - For topic 3–8, wait for its immediately preceding topic to merge into upstream
   `main`. PR 1 is independent. Replay **only that topic's owning patch**, preserving
   upstream notes in the Unreleased Changelog. Produce one Conventional Commit on

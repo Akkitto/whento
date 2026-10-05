@@ -28,6 +28,34 @@ def plan(number=3):
             "target": "codex/pr163-submit-" + slug, "prerequisite_merge": "a" * 40}
 
 
+class WorkflowTests(unittest.TestCase):
+    def test_refresh_push_is_main_only_and_security_scans_are_retained(self):
+        workflows = pub.ROOT.parent / "workflows"
+
+        def push_block(path):
+            lines = path.read_text().splitlines()
+            start = lines.index("  push:")
+            end = next((index for index in range(start + 1, len(lines))
+                        if lines[index] and not lines[index].startswith("    ")), len(lines))
+            return "\n".join(lines[start:end]).rstrip()
+
+        paths = (".github/pr163-publication/**", ".github/workflows/pr163-publication.yml")
+        publisher = workflows / "pr163-publication.yml"
+        self.assertEqual(push_block(publisher), "  push:\n    branches: [main]\n    paths:\n"
+                         + "\n".join(f"      - '{path}'" for path in paths))
+        self.assertNotIn("  pull_request:", publisher.read_text())
+        self.assertIn("github.repository == 'Akkitto/whento' && github.ref == 'refs/heads/main'",
+                      publisher.read_text())
+        app_push = push_block(workflows / "ci.yml")
+        self.assertIn("    branches: [main]", app_push)
+        self.assertIn("    paths-ignore:", app_push)
+        self.assertEqual([line for line in app_push.splitlines() if line.startswith("      - ")],
+                         [f"      - '{path}'" for path in paths])
+        self.assertIn("  pull_request:", (workflows / "ci.yml").read_text())
+        self.assertEqual(push_block(workflows / "security.yml"), "  push:\n    branches: [main]")
+        self.assertIn("  pull_request:", (workflows / "security.yml").read_text())
+
+
 class SelectionTests(unittest.TestCase):
     def exists(self, branch):
         return branch in {"codex/pr163-submit-" + pub.TOPICS[i][0] for i in (0, 1)}

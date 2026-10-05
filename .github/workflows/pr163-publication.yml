@@ -1,6 +1,13 @@
 name: PR163 focused branch publication
 
 on:
+  # Start a newly reviewed source-pin/helper refresh immediately. Scheduled
+  # checks still discover upstream merges; neither event creates upstream PRs.
+  push:
+    branches: [main]
+    paths:
+      - '.github/pr163-publication/**'
+      - '.github/workflows/pr163-publication.yml'
   workflow_dispatch:
   schedule:
     - cron: '17,47 * * * *'
