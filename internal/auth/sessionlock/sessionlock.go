@@ -8,7 +8,6 @@ package sessionlock
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 
@@ -21,12 +20,21 @@ import (
 const class int32 = 0x57485353 // WHSS: WhenTo session security
 
 // Acquire holds the user's lock until the transaction commits or rolls back.
-// A hash collision only serializes unrelated users; it never weakens the lock.
+// An ID collision only serializes unrelated users; it never weakens the lock.
 func Acquire(ctx context.Context, tx pgx.Tx, userID uuid.UUID) error {
-	digest := sha256.Sum256(userID[:])
-	id := int32(binary.BigEndian.Uint32(digest[:4]))
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1, $2)`, class, id); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1, $2)`, class, lockID(userID)); err != nil {
 		return fmt.Errorf("acquire session lock: %w", err)
 	}
 	return nil
+}
+
+// lockID folds all UUID words into the advisory lock's int32 identifier. This
+// is only a deterministic bucket, not a credential hash or an authenticator.
+// Using every word avoids grouping UUIDs that share a prefix (such as UUIDv7).
+func lockID(userID uuid.UUID) int32 {
+	var id uint32
+	for offset := 0; offset < len(userID); offset += 4 {
+		id ^= binary.BigEndian.Uint32(userID[offset : offset+4])
+	}
+	return int32(id)
 }
