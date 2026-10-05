@@ -291,62 +291,58 @@ class PublisherTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("PR163_REPLAY_REPO"), "Set PR163_REPLAY_REPO for actual frozen Git history")
 class RealHistoryTests(unittest.TestCase):
-    def test_all_six_topics_after_squashed_prerequisites_and_upstream_notes(self):
-        original_git = pub.git
+    def clone(self, temporary):
         source_repo = Path(os.environ["PR163_REPLAY_REPO"]).resolve()
-        for number, include_ci in itertools.product(range(3, 9), (False, True)):
-            with self.subTest(topic=number, ci_compose_merged=include_ci), tempfile.TemporaryDirectory() as temporary:
-                repo, candidate = Path(temporary) / "repo", Path(temporary) / "candidate"
-                subprocess.run(["git", "clone", "--shared", "--no-checkout", str(source_repo), str(repo)],
-                               check=True, capture_output=True, text=True)
-                pub.git(repo, "config", "user.name", "Test")
-                pub.git(repo, "config", "user.email", "test@example.invalid")
+        repo = Path(temporary) / "repo"
+        subprocess.run(["git", "clone", "--shared", "--no-checkout", str(source_repo), str(repo)],
+                       check=True, capture_output=True, text=True)
+        pub.git(repo, "config", "user.name", "Test")
+        pub.git(repo, "config", "user.email", "test@example.invalid")
+        return repo
+
+    def prepare_locally(self, repo, payload, candidate):
+        original_git = pub.git
+        def local_git(directory, *args, **kwargs):
+            if args[0] == "fetch":
+                fetched = payload["upstream"] if args[2] == pub.UPSTREAM_URL else payload["source"]
+                return original_git(directory, "fetch", "--no-tags", str(repo), fetched)
+            return original_git(directory, *args, **kwargs)
+        with patch.object(pub, "git", side_effect=local_git):
+            return pub.prepare(repo, payload, candidate)
+
+    def test_all_six_topics_after_reviewed_squashed_prerequisites_and_upstream_notes(self):
+        for number, extra_note in itertools.product(range(3, 9), (False, True)):
+            with self.subTest(topic=number, upstream_note=extra_note), tempfile.TemporaryDirectory() as temporary:
+                repo = self.clone(temporary)
+                candidate = Path(temporary) / "candidate"
                 base = pub.source_base(number)
-                # Model a squash merge: original parent IDs are NOT ancestors.
+                # The entire refreshed lineage must preserve the actual reviewed
+                # PR 173 merge, including its security fixes and merged CI work.
+                pub.git(repo, "merge-base", "--is-ancestor", pub.REVIEWED_BACKEND_MERGE, base)
+                pub.git(repo, "merge-base", "--is-ancestor", base, pub.TOPICS[number - 1][1])
+                # Model squash merging: the source parent ID is NOT an ancestor.
                 tree = pub.git(repo, "rev-parse", base + "^{tree}")
                 prerequisite = pub.git(repo, "commit-tree", tree, "-p", pub.INITIAL,
-                                       input="test: squashed prerequisite\n")
+                                       input="test: squashed reviewed prerequisite\n")
                 pub.git(repo, "checkout", "--detach", prerequisite)
-                ci_patch = pub.git(repo, "diff", "--binary", pub.INITIAL, pub.TOPICS[0][1],
-                                   "--", ".", ":(exclude)CHANGELOG.md", ":(exclude)Makefile", raw=True)
-                def add_independent_ci(directory):
-                    pub.git(directory, "apply", "--3way", "--index", input=ci_patch)
-                    makefile = directory / "Makefile"
-                    makefile.write_text(pub.replay_makefile(pub.read_blob(repo, pub.INITIAL, "Makefile"),
-                                        pub.read_blob(repo, pub.TOPICS[0][1], "Makefile"), makefile.read_text()))
-                    pub.git(directory, "add", "Makefile")
-                if include_ci:
-                    add_independent_ci(repo)
-                changelog = repo / "CHANGELOG.md"
-                changelog.write_text(changelog.read_text().replace("## [Unreleased]\n",
-                                     "## [Unreleased]\n\n### Publication test\n\n- Upstream-only note.\n", 1))
-                pub.git(repo, "add", "CHANGELOG.md")
-                pub.git(repo, "commit", "-qm", "test: upstream-only change")
+                if extra_note:
+                    changelog = repo / "CHANGELOG.md"
+                    changelog.write_text(changelog.read_text().replace("## [Unreleased]\n",
+                                         "## [Unreleased]\n\n### Publication test\n\n- Upstream-only note.\n", 1))
+                    pub.git(repo, "add", "CHANGELOG.md")
+                    pub.git(repo, "commit", "-qm", "test: upstream-only change")
                 main = pub.git(repo, "rev-parse", "HEAD")
                 payload = dict(plan(number), upstream=main, prerequisite_merge=prerequisite)
-                def local_git(directory, *args, **kwargs):
-                    if args[0] == "fetch":
-                        fetched = main if args[2] == pub.UPSTREAM_URL else payload["source"]
-                        return original_git(directory, "fetch", "--no-tags", str(repo), fetched)
-                    return original_git(directory, *args, **kwargs)
-                with patch.object(pub, "git", side_effect=local_git):
-                    pub.prepare(repo, payload, candidate)
+                self.prepare_locally(repo, payload, candidate)
                 self.assertEqual(pub.git(candidate, "rev-parse", "HEAD^"), main)
-                self.assertIn("- Upstream-only note.", (candidate / "CHANGELOG.md").read_text())
+                if extra_note:
+                    self.assertIn("- Upstream-only note.", (candidate / "CHANGELOG.md").read_text())
                 expected = set(pub.git(repo, "diff", "--name-only", base, payload["source"]).splitlines())
                 actual = set(pub.git(candidate, "diff", "--name-only", main, "HEAD").splitlines())
                 self.assertEqual(actual, expected)
-                # All non-Changelog code is exactly audited source plus the
-                # independent CI/Compose patch, if that PR has also merged.
-                expected_tree = payload["source"]
-                if include_ci:
-                    expected_worktree = Path(temporary) / "expected"
-                    pub.git(repo, "worktree", "add", "--detach", str(expected_worktree), payload["source"])
-                    add_independent_ci(expected_worktree)
-                    expected_tree = pub.git(expected_worktree, "write-tree")
-                self.assertEqual(pub.git(candidate, "diff", expected_tree, "HEAD", "--",
+                self.assertEqual(pub.git(candidate, "diff", payload["source"], "HEAD", "--",
                                          ".", ":(exclude)CHANGELOG.md", ":(exclude)Makefile"), "")
-                expected_makefile = pub.read_blob(repo, expected_tree, "Makefile").splitlines()
+                expected_makefile = pub.read_blob(repo, payload["source"], "Makefile").splitlines()
                 actual_makefile = (candidate / "Makefile").read_text().splitlines()
                 self.assertEqual(set(actual_makefile[0].split()), set(expected_makefile[0].split()))
                 self.assertEqual(actual_makefile[1:], expected_makefile[1:])
@@ -354,6 +350,46 @@ class RealHistoryTests(unittest.TestCase):
                         "HEAD", "--not", main)
                 pub.git(repo, "bundle", "verify", str(Path(temporary) / "candidate.bundle"))
 
+    def test_bootstrap_replays_on_actual_reviewed_merge_without_reverting_security(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = self.clone(temporary)
+            candidate = Path(temporary) / "candidate"
+            main = pub.REVIEWED_BACKEND_MERGE
+            self.assertEqual(pub.source_base(3), main)
+            self.prepare_locally(repo, dict(plan(), upstream=main, prerequisite_merge=main), candidate)
+            for path in (
+                "internal/auth/sessionlock/sessionlock.go",
+                "internal/auth/sessionlock/sessionlock_test.go",
+                "internal/auth/repository/credential_transition_db_test.go",
+                "internal/auth/handlers/password_reset_handler.go",
+                "internal/auth/handlers/password_reset_handler_test.go",
+                "internal/auth/service/magic_link_service.go",
+                "internal/mfa/repository/mfa_repository.go",
+                "internal/mfa/service/mfa_service.go",
+                "internal/calendar/repository/calendar_dates_db_test.go",
+                "frontend/src/views/MagicLinkVerify.vue",
+                "frontend/e2e/mailbox-auth.spec.ts",
+            ):
+                with self.subTest(path=path):
+                    self.assertEqual(pub.read_blob(candidate, "HEAD", path),
+                                     pub.read_blob(repo, main, path))
+
+    def test_original_bootstrap_patch_conflicts_on_actual_reviewed_merge(self):
+        # Keep a negative regression for the exact failure from run 37374772405.
+        old_base = "963b270ecc0559ae93909f3b2a3c3d4ed35c7cee"
+        old_source = "2cfefb31fde89746c46ee09b9fff798adabf7b4c"
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = self.clone(temporary)
+            pub.git(repo, "checkout", "--detach", pub.REVIEWED_BACKEND_MERGE)
+            old_patch = pub.git(repo, "diff", "--binary", "--no-ext-diff", "--no-textconv",
+                                old_base, old_source, "--", ".", ":(exclude)CHANGELOG.md",
+                                ":(exclude)Makefile", raw=True)
+            result = pub.git(repo, "apply", "--3way", "--index", input=old_patch, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(set(pub.git(repo, "diff", "--name-only", "--diff-filter=U").splitlines()), {
+                "cmd/wire.go", "internal/auth/service/auth_service.go",
+                "internal/mfa/handlers/mfa_handler_test.go", "pkg/httputil/response.go",
+            })
 
 if __name__ == "__main__":
     unittest.main()

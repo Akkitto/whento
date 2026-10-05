@@ -78,9 +78,10 @@ jobs:
         with:
           name: publication-plan
           path: ${{ runner.temp }}/publication
+      - name: Test reviewed merge and frozen topic replay regressions
+        run: PR163_REPLAY_REPO="$PWD" python3 -m unittest discover -s .github/pr163-publication -v
       - name: Replay only the owning topic on current upstream
         run: |
-          PR163_REPLAY_REPO="$PWD" python3 -m unittest discover -s .github/pr163-publication -v
           python3 .github/pr163-publication/publication.py prepare \
             --plan "$RUNNER_TEMP/publication/plan.json" --directory "$RUNNER_TEMP/candidate"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7

@@ -5,6 +5,7 @@ Related to #163; focused PR 4 of 8. Submit after operator bootstrap is merged.
 ## Summary
 
 - Add SQL-backed reminder jobs with due-time rearming, restart recovery, retry/backoff and leased claims.
+- Add the scheduler-owned calendar scan, with database coverage for configuration filtering, ordering and complete row mapping.
 - Fence queue-state updates by claim identity so an expired worker cannot complete a newer worker's claim.
 - Use calendar-local dates/timezones, bounded catch-up, and distinct handling of transient query failures versus definitive cancellation.
 - Recheck owner consent, SMTP capability and participant verification at delivery.

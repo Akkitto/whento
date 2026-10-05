@@ -61,7 +61,13 @@ conflicts require an explicit code review, not automatic ours/theirs resolution.
 An already published/open PR is intentionally not rebased by this workflow.
 If upstream requires changes to that PR, they remain a separately reviewed task.
 
-Source branches stay untouched. Submission branches are created one at a time as
+The scheduler leaves audited source branches untouched. After PR 173's reviewed
+merge, topics 3–8 were explicitly refreshed and their frozen IDs updated together;
+topic 3 now uses the accepted merge `f33ec7d` as its patch base. Original source
+history is preserved by the `codex/pr163-before-refresh-20261005-safe-migrations`
+archive branch; do not open a PR for that cumulative archive.
+
+Submission branches are created one at a time as
 prerequisites merge. No force-update of an existing branch is possible. Disable
 this workflow and revoke its token after all eight PRs merge. GitHub can disable
 inactive repository schedules after 60 days; re-enable if the series takes that
@@ -77,10 +83,13 @@ actionlint .github/workflows/pr163-publication.yml
 shellcheck .github/pr163-publication/askpass.sh .github/pr163-publication/verify.sh
 ```
 
-The optional replay test needs all frozen topic objects locally. It simulates
-each prerequisite being squash-merged, adds a separate upstream Changelog note,
-tests both with and without CI/Compose merged, and checks every candidate's parent,
+The optional replay tests need all refreshed and archived topic objects locally.
+They exercise each remaining prerequisite being squash-merged, both with and
+without an extra upstream Changelog note, and check every candidate's parent,
 owning file list, audited source contents (ignoring `.PHONY` name order only),
-and bundle. Fixtures use private temporary repositories and never push remotely.
+and bundle. They also replay bootstrap directly on the actual reviewed PR 173
+merge and verify its security files are preserved, and reproduce the original
+four conflicts as a negative regression. Fixtures use private temporary
+repositories and never push remotely.
 The real application gate deliberately refuses to run outside GitHub Actions to
 avoid mistaking an operator's database for disposable test infrastructure.

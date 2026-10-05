@@ -20,15 +20,18 @@ UPSTREAM = "When-To/whento"
 FORK_URL = "https://github.com/Akkitto/whento.git"
 UPSTREAM_URL = "https://github.com/When-To/whento.git"
 INITIAL = "2ea39819d2c2c7b4c808a1cbc4ec4751fd304315"
+# PR 173 was reviewed and squash-merged with additional security fixes. Topic 3
+# must start from that accepted tree, not the original pre-review source-2 tip.
+REVIEWED_BACKEND_MERGE = "f33ec7d916804610706bd589d95193fb0cc3fc22"
 TOPICS = [
     ("ci-compose", "6d928b6080f037767eb5507a82adc4a199363704"),
     ("backend-hardening", "963b270ecc0559ae93909f3b2a3c3d4ed35c7cee"),
-    ("bootstrap-password", "2cfefb31fde89746c46ee09b9fff798adabf7b4c"),
-    ("durable-reminders", "27d78a88dd0930d61accf9fe964379767d17e8d8"),
-    ("holiday-compatibility", "8d7ba2600349ff89f031b8e8952053163bab297b"),
-    ("dashboard-ordering", "45f69d428e0a5f23b132dd2c9ba08cc07fee6e22"),
-    ("session-coordination", "11a6070400081a6f0c5603e80733fbfdb77cb1a6"),
-    ("safe-migrations", "dbbceddbcee56dfb0b4e87e23b923a72658749a9"),
+    ("bootstrap-password", "06e4a94ba76c771db2e09bee945d122ed17ca3a2"),
+    ("durable-reminders", "6f7f9e1a09aef3d4fd6e7c07de87ab4c61017587"),
+    ("holiday-compatibility", "953861319d6baeb00ce94709ffa3e2de8067ede4"),
+    ("dashboard-ordering", "dbeb7896b269483ca3e2987f1c0cda680ed8aa16"),
+    ("session-coordination", "002fe8495a4ec9d739a043072e3e4325c7250010"),
+    ("safe-migrations", "88c285e635d7ef39724b0fcdde1af13f03faa676"),
 ]
 ROOT = Path(__file__).resolve().parent
 SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -153,7 +156,11 @@ def validate_plan(plan):
 
 
 def source_base(number):
-    return INITIAL if number <= 2 else TOPICS[number - 2][1]
+    if number <= 2:
+        return INITIAL
+    if number == 3:
+        return REVIEWED_BACKEND_MERGE
+    return TOPICS[number - 2][1]
 
 
 def replay_changelog(base, source, current):
