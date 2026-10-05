@@ -103,6 +103,33 @@ jobs:
       - name: Lint workflows
         run: actionlint -color
 
+  # The Compose files are the documented deployment, and until now nothing validated
+  # them: a syntax or schema error made every `docker compose up` fail at startup.
+  # Compose 2.20+ in particular rejects a `pids_limit` that disagrees with
+  # `deploy.resources.limits.pids`, which went unnoticed for exactly that reason.
+  # `docker compose config` parses and interpolates each file; `-q` keeps it quiet.
+  # DB_PASSWORD and REDIS_PASSWORD get dummy values only so the `:?` required
+  # variables interpolate. The devcontainer Compose file is checked too — it is
+  # how contributors start the stack.
+  validate-compose:
+    name: Validate Compose Files
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Check the Compose files parse
+        env:
+          DB_PASSWORD: ci-only
+          REDIS_PASSWORD: ci-only
+        run: |
+          set -euo pipefail
+          for file in docker-compose.yml docker-compose.dev.yml .devcontainer/docker-compose.yml; do
+            echo "Validating $file..."
+            docker compose -f "$file" config -q
+          done
+          echo "✓ All Compose files are valid"
+
   # `make format-check` existed but was never called anywhere: Go formatting was enforced
   # only by the opt-in .githooks/pre-commit, which `git commit --no-verify` walks past.
   format-check:
