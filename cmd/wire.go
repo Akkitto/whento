@@ -7,6 +7,7 @@ package main
 import (
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -103,6 +104,10 @@ type handlers struct {
 	notifyConfig     *notifyHandlers.NotifyConfigHandler
 	participantEmail *notifyHandlers.ParticipantEmailHandler
 
+	// Expired refresh-token sweep. Independent of a successful rotation, which
+	// is the only other place those rows are deleted.
+	refreshTokens *authRepo.TokenRepository
+
 	// Availability
 	availability *availabilityHandlers.AvailabilityHandler
 	recurrence   *availabilityHandlers.RecurrenceHandler
@@ -141,8 +146,8 @@ func buildHandlers(d *deps) (*handlers, error) {
 	// The MFA repository is for the 2FA check during login; the cache is for
 	// temporary-token replay prevention.
 	authSvc := authService.NewAuthService(userRepo, tokenRepo, mfaRepository, d.jwtManager, d.cacheStore, d.cfg.BcryptCost, d.cfg.AllowedRegister, d.cfg.AllowedEmails)
-	passwordResetSvc := authService.NewPasswordResetService(userRepo, tokenRepo, d.mailer, d.jwtManager, d.cfg, d.log, d.cfg.BcryptCost)
-	magicLinkSvc := authService.NewMagicLinkService(userRepo, tokenRepo, d.mailer, d.jwtManager, d.cfg, d.log)
+	passwordResetSvc := authService.NewPasswordResetService(userRepo, tokenRepo, mfaRepository, d.mailer, d.jwtManager, d.cfg, d.log, d.cfg.BcryptCost)
+	magicLinkSvc := authService.NewMagicLinkService(userRepo, mfaRepository, d.mailer, d.jwtManager, d.cfg, d.log)
 
 	// ========== PASSKEY MODULE ==========
 	passkeyRepository := passkeyRepo.NewPasskeyRepository(d.pool)
@@ -157,7 +162,7 @@ func buildHandlers(d *deps) (*handlers, error) {
 	passkeyHandler := passkeyHandlers.NewPasskeyHandler(passkeySvc, authSvc, d.log)
 
 	// ========== MFA MODULE ==========
-	mfaSvc := mfaService.NewMFAService(mfaRepository, userRepo, tokenRepo, d.cfg, d.log)
+	mfaSvc := mfaService.NewMFAService(mfaRepository, userRepo, d.cfg, d.log)
 	d.log.Info("MFA service initialized")
 
 	mfaHandler := mfaHandlers.NewMFAHandler(mfaSvc, authSvc, d.jwtManager, d.cacheStore, d.log)
@@ -226,8 +231,8 @@ func buildHandlers(d *deps) (*handlers, error) {
 	return &handlers{
 		health:        authHandlers.NewHealthHandler(d.pool, d.cacheProbe),
 		auth:          authHandler,
-		passwordReset: authHandlers.NewPasswordResetHandler(passwordResetSvc),
-		magicLink:     authHandlers.NewMagicLinkHandler(magicLinkSvc, d.mailer, d.log),
+		passwordReset: authHandlers.NewPasswordResetHandler(passwordResetSvc, d.log),
+		magicLink:     authHandlers.NewMagicLinkHandler(magicLinkSvc, d.mailer, d.log, magicLinkTrustedOrigins(d.cfg)),
 		adminMFA:      authHandlers.NewAdminMFAHandler(mfaSvc, d.log),
 
 		passkey: passkeyHandler,
@@ -248,6 +253,8 @@ func buildHandlers(d *deps) (*handlers, error) {
 			d.log,
 		),
 
+		refreshTokens: tokenRepo,
+
 		availability: availabilityHandlers.NewAvailabilityHandler(availabilitySvc),
 		recurrence:   availabilityHandlers.NewRecurrenceHandler(availabilitySvc),
 		events:       availabilityHandlers.NewEventsHandler(availCalendarRepo, d.broker),
@@ -257,4 +264,40 @@ func buildHandlers(d *deps) (*handlers, error) {
 
 		seo: seo.NewHandler(d.cfg.AppURL, d.cfg.DisableRobots, buildType),
 	}, nil
+}
+
+// magicLinkTrustedOrigins builds the exact set of browser origins a magic-link
+// verification POST is allowed to come from.
+//
+// The application origin is always trusted: the SPA is served from it, and a
+// same-origin confirmation is the point of the whole POST/CSRF rework. Each
+// CORS_ORIGINS entry is also trusted when it is a real origin — scheme://host,
+// with the trailing slash normalized away. The wildcard "*" is not: it means
+// "any origin may call the API" for the CORS middleware, but for magic links it
+// is exactly the broad-open value that would let an attack site confirm on the
+// victim's behalf, so it can never contribute to this set.
+func magicLinkTrustedOrigins(cfg *config.Config) []string {
+	seen := make(map[string]struct{}, len(cfg.CORSOrigins)+1)
+	origins := make([]string, 0, len(cfg.CORSOrigins)+1)
+
+	add := func(o string) {
+		o = strings.TrimRight(o, "/")
+		if o == "" {
+			return
+		}
+		if _, ok := seen[o]; ok {
+			return
+		}
+		seen[o] = struct{}{}
+		origins = append(origins, o)
+	}
+
+	add(cfg.AppURL)
+	for _, origin := range cfg.CORSOrigins {
+		if origin == "*" || origin == "" {
+			continue
+		}
+		add(origin)
+	}
+	return origins
 }

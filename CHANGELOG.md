@@ -45,6 +45,9 @@ line per release rather than listed individually.
 - `validate-compose` CI check: every supported Compose file (`docker-compose.yml`,
   `docker-compose.dev.yml`, `.devcontainer/docker-compose.yml`) must parse and
   interpolate with `docker compose config -q`.
+- Durable, migration-backed pending-MFA nonce consumption and refresh-session
+  families with per-user advisory locking, so concurrent refresh rotations and
+  a logout cannot lose each other.
 
 ### Changed
 
@@ -55,6 +58,52 @@ line per release rather than listed individually.
 - `make test` now primes the two artifacts a clean checkout is missing (`web/dist`
   placeholder and generated Swagger docs) before running the root and shared-module
   Go suites.
+- **Partial profile and calendar updates are field-preserving.** `PATCH
+  /api/v1/auth/me` and the calendar settings PATCH write only the supplied
+  fields, so two tabs saving unrelated fields no longer clobber each other.
+  Calendar date ordering is checked against the locked current row, retaining
+  the existing database constraint as a second guard.
+- **The last administrator is protected.** Demoting or deleting the last admin
+  is refused transactionally, even under concurrent demotions or a deletion
+  racing a registration.
+
+### Security
+
+- **Magic links no longer log the visitor in by mere link click.** A GET
+  `/api/v1/auth/magic-link/verify/{token}` used to consume the token and set a
+  session, so an attack-site link pointing at the API could silently switch an
+  already-authenticated account. Verification is now a confirmed, same-origin
+  `POST /api/v1/auth/magic-link/verify` the SPA submits only after the visitor
+  taps “Continue signing in”, guarded by the `Origin` header and an explicit
+  `X-Whento-Auth-Intent: magic-link` header (plain form posts and cross-site
+  scripts are refused), with a bounded request body and `Cache-Control:
+  no-store` / `Referrer-Policy: no-referrer` responses. The legacy GET is a
+  read-only 405 that changes nothing.
+- **Mailbox logins no longer bypass MFA.** A magic link or password reset on an
+  MFA-protected account now returns a pending second-factor challenge instead of
+  a session; the account is fully signed in only after the code verifies through
+  the normal MFA flow. A failed MFA lookup is an error, not “MFA disabled”.
+- **One-time mailbox proofs are consumed atomically.** The magic-link and
+  password-reset tokens are claimed, applied and cleared in a single transaction
+  (`SELECT … FOR UPDATE`), so concurrent verifications have exactly one winner
+  and a transient failure never burns or replays a proof. A password reset also
+  advances the security generation and revokes every existing session in the
+  same commit.
+- Password resets, password changes and MFA setup now share a namespaced
+  session lock with refresh issuance and rotation. Credential changes and
+  session revocation commit together; failed revocation rolls back the change.
+- Magic-link confirmation removes the proof from browser and router history,
+  including subsequent Back navigation; reloading the cleaned URL shows
+  instructions to reopen the email link. Missing MFA challenges fail closed.
+
+### Fixed
+
+- Registered the bcrypt byte-limit validator used by reset requests, restoring
+  the reset endpoint and rejecting passwords over 72 UTF-8 bytes without a panic.
+- Mailbox endpoints distinguish invalid proofs from logged server failures
+  without exposing database errors. Magic links remain retryable after transient
+  MFA lookup or session insertion failures. Trusted origins normalize both
+  scheme and hostname; legacy verification uses the correct 405 error code.
 
 ---
 

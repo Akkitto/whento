@@ -16,11 +16,17 @@ import (
 
 	"github.com/whento/pkg/dberr"
 	"github.com/whento/whento/internal/auth/models"
+	"github.com/whento/whento/internal/auth/sessionlock"
 )
 
 var (
 	ErrUserNotFound      = errors.New("user not found")
 	ErrUserAlreadyExists = errors.New("user with this email already exists")
+	// ErrLastAdmin reports that a demotion or deletion would leave the instance
+	// with zero administrators. An instance must always keep at least one admin
+	// (see the admin invariant in UpdateRole and Delete): zero admins is an
+	// operator-locked-out state that only a manual database rescue can undo.
+	ErrLastAdmin = errors.New("the instance must keep at least one administrator")
 )
 
 // UserRepository handles user database operations
@@ -70,7 +76,7 @@ func (r *UserRepository) GetByID(ctx context.Context, id uuid.UUID) (*models.Use
 		       email_verified, verification_token, verification_token_expires_at,
 		       password_reset_token, password_reset_token_expires_at,
 		       magic_link_token, magic_link_token_expires_at,
-		       created_at, updated_at
+		       security_generation, created_at, updated_at
 		FROM users
 		WHERE id = $1`
 
@@ -90,6 +96,7 @@ func (r *UserRepository) GetByID(ctx context.Context, id uuid.UUID) (*models.Use
 		&user.PasswordResetTokenExpiresAt,
 		&user.MagicLinkToken,
 		&user.MagicLinkTokenExpiresAt,
+		&user.SecurityGeneration,
 		&user.CreatedAt,
 		&user.UpdatedAt,
 	)
@@ -111,7 +118,7 @@ func (r *UserRepository) GetByEmail(ctx context.Context, email string) (*models.
 		       email_verified, verification_token, verification_token_expires_at,
 		       password_reset_token, password_reset_token_expires_at,
 		       magic_link_token, magic_link_token_expires_at,
-		       created_at, updated_at
+		       security_generation, created_at, updated_at
 		FROM users
 		WHERE email = $1`
 
@@ -131,6 +138,7 @@ func (r *UserRepository) GetByEmail(ctx context.Context, email string) (*models.
 		&user.PasswordResetTokenExpiresAt,
 		&user.MagicLinkToken,
 		&user.MagicLinkTokenExpiresAt,
+		&user.SecurityGeneration,
 		&user.CreatedAt,
 		&user.UpdatedAt,
 	)
@@ -140,6 +148,65 @@ func (r *UserRepository) GetByEmail(ctx context.Context, email string) (*models.
 			return nil, ErrUserNotFound
 		}
 		return nil, fmt.Errorf("failed to get user by email: %w", err)
+	}
+
+	return user, nil
+}
+
+// UpdateProfile updates only the profile columns present in the request.
+//
+// A partial `COALESCE` write rather than a whole-row rewrite: the previous
+// read-modify-write flow wrote `display_name`, `locale` and `timezone` together from a
+// snapshot read earlier, so two concurrent partial saves (e.g. the display-name form
+// and the preferences form from two tabs) would each overwrite the other's
+// untouched-by-them field with its stale value. Writing only the columns a request
+// actually carries removes that lost-update window; the row can never regress a field
+// this request did not mean to touch.
+func (r *UserRepository) UpdateProfile(
+	ctx context.Context,
+	userID uuid.UUID,
+	displayName *string,
+	locale *string,
+	timezone *string,
+) (*models.User, error) {
+	query := `
+		UPDATE users
+		SET display_name = COALESCE($2, display_name),
+		    locale = COALESCE($3, locale),
+		    timezone = COALESCE($4, timezone),
+		    updated_at = NOW()
+		WHERE id = $1
+		RETURNING id, email, password_hash, display_name, role, locale, timezone,
+		          email_verified, verification_token, verification_token_expires_at,
+		          password_reset_token, password_reset_token_expires_at,
+		          magic_link_token, magic_link_token_expires_at,
+		          security_generation, created_at, updated_at`
+
+	user := &models.User{}
+	err := r.pool.QueryRow(ctx, query, userID, displayName, locale, timezone).Scan(
+		&user.ID,
+		&user.Email,
+		&user.PasswordHash,
+		&user.DisplayName,
+		&user.Role,
+		&user.Locale,
+		&user.Timezone,
+		&user.EmailVerified,
+		&user.VerificationToken,
+		&user.VerificationTokenExpiresAt,
+		&user.PasswordResetToken,
+		&user.PasswordResetTokenExpiresAt,
+		&user.MagicLinkToken,
+		&user.MagicLinkTokenExpiresAt,
+		&user.SecurityGeneration,
+		&user.CreatedAt,
+		&user.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrUserNotFound
+		}
+		return nil, fmt.Errorf("failed to update user profile: %w", err)
 	}
 
 	return user, nil
@@ -170,33 +237,84 @@ func (r *UserRepository) Update(ctx context.Context, user *models.User) error {
 	return nil
 }
 
-// UpdatePassword updates a user's password
-func (r *UserRepository) UpdatePassword(ctx context.Context, userID uuid.UUID, passwordHash string) error {
+// UpdatePassword changes the verified password and revokes sessions atomically.
+// Matching the previously verified hash prevents a concurrent reset from being
+// overwritten by a request authenticated against the old password.
+func (r *UserRepository) UpdatePassword(ctx context.Context, userID uuid.UUID, passwordHash, previousHash string) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin password change: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := sessionlock.Acquire(ctx, tx, userID); err != nil {
+		return err
+	}
 	query := `
 		UPDATE users
-		SET password_hash = $2, updated_at = NOW()
-		WHERE id = $1`
+		SET password_hash = $2, security_generation = security_generation + 1, updated_at = NOW()
+		WHERE id = $1 AND password_hash = $3`
 
-	result, err := r.pool.Exec(ctx, query, userID, passwordHash)
+	result, err := tx.Exec(ctx, query, userID, passwordHash, previousHash)
 	if err != nil {
 		return fmt.Errorf("failed to update password: %w", err)
 	}
 
 	if result.RowsAffected() == 0 {
-		return ErrUserNotFound
+		return ErrStaleSecurityGeneration
 	}
-
-	return nil
+	if _, err := tx.Exec(ctx, `DELETE FROM refresh_tokens WHERE user_id = $1`, userID); err != nil {
+		return fmt.Errorf("revoke sessions after password change: %w", err)
+	}
+	return tx.Commit(ctx)
 }
 
 // UpdateRole updates a user's role
+//
+// Admin invariant: the last administrator cannot be demoted. Demotion is
+// serialised with deletion and with other demotions on advisory lock 2, so two
+// admins demoting each other concurrently cannot both commit — the second one
+// to acquire the lock counts only one administrator and refuses.
 func (r *UserRepository) UpdateRole(ctx context.Context, userID uuid.UUID, role string) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Advisory lock 2 serialises every operation that can change how many
+	// administrators exist (UpdateRole, Delete). Counting under the lock is what
+	// makes "is this the last admin?" a decision that cannot be out-raced.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(2)`); err != nil {
+		return fmt.Errorf("failed to acquire advisory lock: %w", err)
+	}
+
+	// Read the target's current role under the lock, before deciding whether a
+	// demotion would leave zero admins.
+	var currentRole string
+	if err := tx.QueryRow(ctx, `SELECT role FROM users WHERE id = $1`, userID).Scan(&currentRole); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrUserNotFound
+		}
+		return fmt.Errorf("failed to read user role: %w", err)
+	}
+
+	// Demoting an admin? Refuse when the instance has only this one.
+	if currentRole == models.RoleAdmin && role != models.RoleAdmin {
+		var admins int
+		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM users WHERE role = $1`, models.RoleAdmin).Scan(&admins); err != nil {
+			return fmt.Errorf("failed to count administrators: %w", err)
+		}
+		if admins <= 1 {
+			return ErrLastAdmin
+		}
+	}
+
 	query := `
 		UPDATE users
 		SET role = $2, updated_at = NOW()
 		WHERE id = $1`
 
-	result, err := r.pool.Exec(ctx, query, userID, role)
+	result, err := tx.Exec(ctx, query, userID, role)
 	if err != nil {
 		return fmt.Errorf("failed to update role: %w", err)
 	}
@@ -205,20 +323,61 @@ func (r *UserRepository) UpdateRole(ctx context.Context, userID uuid.UUID, role 
 		return ErrUserNotFound
 	}
 
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
 	return nil
 }
 
 // Delete deletes a user
+//
+// Admin invariant: the last administrator cannot be deleted. Like UpdateRole, this
+// runs under advisory lock 2, so two admins deleting each other concurrently
+// cannot both commit — the second sees one admin left and refuses.
 func (r *UserRepository) Delete(ctx context.Context, id uuid.UUID) error {
-	query := `DELETE FROM users WHERE id = $1`
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 
-	result, err := r.pool.Exec(ctx, query, id)
+	// Same lock as UpdateRole: deletion and demotion both change the admin
+	// count, so they must serialize with each other.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(2)`); err != nil {
+		return fmt.Errorf("failed to acquire advisory lock: %w", err)
+	}
+
+	var currentRole string
+	if err := tx.QueryRow(ctx, `SELECT role FROM users WHERE id = $1`, id).Scan(&currentRole); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrUserNotFound
+		}
+		return fmt.Errorf("failed to read user role: %w", err)
+	}
+
+	// Deleting an admin? Refuse when the instance has only this one.
+	if currentRole == models.RoleAdmin {
+		var admins int
+		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM users WHERE role = $1`, models.RoleAdmin).Scan(&admins); err != nil {
+			return fmt.Errorf("failed to count administrators: %w", err)
+		}
+		if admins <= 1 {
+			return ErrLastAdmin
+		}
+	}
+
+	result, err := tx.Exec(ctx, `DELETE FROM users WHERE id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("failed to delete user: %w", err)
 	}
 
 	if result.RowsAffected() == 0 {
 		return ErrUserNotFound
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	return nil
@@ -231,7 +390,7 @@ func (r *UserRepository) List(ctx context.Context) ([]*models.User, error) {
 		       email_verified, verification_token, verification_token_expires_at,
 		       password_reset_token, password_reset_token_expires_at,
 		       magic_link_token, magic_link_token_expires_at,
-		       created_at, updated_at
+		       security_generation, created_at, updated_at
 		FROM users
 		ORDER BY created_at DESC`
 
@@ -259,6 +418,7 @@ func (r *UserRepository) List(ctx context.Context) ([]*models.User, error) {
 			&user.PasswordResetTokenExpiresAt,
 			&user.MagicLinkToken,
 			&user.MagicLinkTokenExpiresAt,
+			&user.SecurityGeneration,
 			&user.CreatedAt,
 			&user.UpdatedAt,
 		)
@@ -357,7 +517,7 @@ func (r *UserRepository) GetByVerificationToken(ctx context.Context, token strin
 		       email_verified, verification_token, verification_token_expires_at,
 		       password_reset_token, password_reset_token_expires_at,
 		       magic_link_token, magic_link_token_expires_at,
-		       created_at, updated_at
+		       security_generation, created_at, updated_at
 		FROM users
 		WHERE verification_token = $1
 		  AND verification_token_expires_at > NOW()`
@@ -378,6 +538,7 @@ func (r *UserRepository) GetByVerificationToken(ctx context.Context, token strin
 		&user.PasswordResetTokenExpiresAt,
 		&user.MagicLinkToken,
 		&user.MagicLinkTokenExpiresAt,
+		&user.SecurityGeneration,
 		&user.CreatedAt,
 		&user.UpdatedAt,
 	)
@@ -442,7 +603,7 @@ func (r *UserRepository) GetByPasswordResetToken(ctx context.Context, token stri
 		SELECT id, email, password_hash, display_name, role, locale, timezone,
 		       email_verified, verification_token, verification_token_expires_at,
 		       password_reset_token, password_reset_token_expires_at,
-		       created_at, updated_at
+		       security_generation, created_at, updated_at
 		FROM users
 		WHERE password_reset_token = $1
 		  AND password_reset_token_expires_at > NOW()`
@@ -461,6 +622,7 @@ func (r *UserRepository) GetByPasswordResetToken(ctx context.Context, token stri
 		&user.VerificationTokenExpiresAt,
 		&user.PasswordResetToken,
 		&user.PasswordResetTokenExpiresAt,
+		&user.SecurityGeneration,
 		&user.CreatedAt,
 		&user.UpdatedAt,
 	)
@@ -504,7 +666,7 @@ func (r *UserRepository) GetByEmailVerified(ctx context.Context, email string) (
 		       email_verified, verification_token, verification_token_expires_at,
 		       password_reset_token, password_reset_token_expires_at,
 		       magic_link_token, magic_link_token_expires_at,
-		       created_at, updated_at
+		       security_generation, created_at, updated_at
 		FROM users
 		WHERE email = $1 AND email_verified = true`
 
@@ -524,6 +686,7 @@ func (r *UserRepository) GetByEmailVerified(ctx context.Context, email string) (
 		&user.PasswordResetTokenExpiresAt,
 		&user.MagicLinkToken,
 		&user.MagicLinkTokenExpiresAt,
+		&user.SecurityGeneration,
 		&user.CreatedAt,
 		&user.UpdatedAt,
 	)
@@ -567,7 +730,7 @@ func (r *UserRepository) GetByMagicLinkToken(ctx context.Context, token string) 
 		       email_verified, verification_token, verification_token_expires_at,
 		       password_reset_token, password_reset_token_expires_at,
 		       magic_link_token, magic_link_token_expires_at,
-		       created_at, updated_at
+		       security_generation, created_at, updated_at
 		FROM users
 		WHERE magic_link_token = $1
 		  AND magic_link_token_expires_at > NOW()`
@@ -588,6 +751,7 @@ func (r *UserRepository) GetByMagicLinkToken(ctx context.Context, token string) 
 		&user.PasswordResetTokenExpiresAt,
 		&user.MagicLinkToken,
 		&user.MagicLinkTokenExpiresAt,
+		&user.SecurityGeneration,
 		&user.CreatedAt,
 		&user.UpdatedAt,
 	)
@@ -621,4 +785,194 @@ func (r *UserRepository) ClearMagicLinkToken(ctx context.Context, userID uuid.UU
 	}
 
 	return nil
+}
+
+// ConsumeMagicLinkToken finalizes a prepared mailbox login under the session
+// lock. It revalidates the proof and captured security generation, then clears
+// the proof and inserts the optional refresh session in the same transaction.
+// Any failure leaves the proof usable; concurrent finalizations have one winner.
+func (r *UserRepository) ConsumeMagicLinkToken(ctx context.Context, token string, securityGeneration int64, session *models.RefreshToken) (*models.User, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin magic link claim: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Resolve without a row lock, acquire the session lock, then revalidate the
+	// proof under FOR UPDATE. Every credential transition uses this lock order.
+	var userID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT id FROM users WHERE magic_link_token = $1 AND magic_link_token_expires_at > NOW()`, token).Scan(&userID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrUserNotFound
+		}
+		return nil, fmt.Errorf("resolve magic link owner: %w", err)
+	}
+	if err := sessionlock.Acquire(ctx, tx, userID); err != nil {
+		return nil, err
+	}
+
+	user := &models.User{}
+	query := `
+		SELECT id, email, password_hash, display_name, role, locale, timezone,
+		       email_verified, verification_token, verification_token_expires_at,
+		       password_reset_token, password_reset_token_expires_at,
+		       magic_link_token, magic_link_token_expires_at,
+		       security_generation, created_at, updated_at
+		FROM users
+		WHERE magic_link_token = $1
+		  AND magic_link_token_expires_at > NOW()
+		FOR UPDATE`
+	err = tx.QueryRow(ctx, query, token).Scan(
+		&user.ID,
+		&user.Email,
+		&user.PasswordHash,
+		&user.DisplayName,
+		&user.Role,
+		&user.Locale,
+		&user.Timezone,
+		&user.EmailVerified,
+		&user.VerificationToken,
+		&user.VerificationTokenExpiresAt,
+		&user.PasswordResetToken,
+		&user.PasswordResetTokenExpiresAt,
+		&user.MagicLinkToken,
+		&user.MagicLinkTokenExpiresAt,
+		&user.SecurityGeneration,
+		&user.CreatedAt,
+		&user.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrUserNotFound
+		}
+		return nil, fmt.Errorf("failed to claim user by magic link token: %w", err)
+	}
+	if user.SecurityGeneration != securityGeneration {
+		return nil, ErrStaleSecurityGeneration
+	}
+	if session != nil && session.UserID != user.ID {
+		return nil, ErrUserNotFound
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE users
+		SET magic_link_token = NULL,
+		    magic_link_token_expires_at = NULL,
+		    updated_at = NOW()
+		WHERE id = $1`, user.ID); err != nil {
+		return nil, fmt.Errorf("failed to clear claimed magic link token: %w", err)
+	}
+
+	// Token signing and the MFA lookup happen before claiming the proof. The
+	// final session insert shares this transaction, so an insert failure leaves
+	// the email link usable and concurrent finalizations still have one winner.
+	if session != nil {
+		if err := tx.QueryRow(ctx, `INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at, family_id) VALUES ($1, $2, $3, $4, $5) RETURNING created_at`,
+			session.ID, session.UserID, session.TokenHash, session.ExpiresAt, session.FamilyID).Scan(&session.CreatedAt); err != nil {
+			return nil, fmt.Errorf("insert magic link session: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit magic link claim: %w", err)
+	}
+
+	return user, nil
+}
+
+// ConsumePasswordResetToken claims a password-reset proof and applies the new
+// password atomically, then returns the user with the advanced security
+// generation.
+//
+// One transaction does the whole transition: the row is locked FOR UPDATE by its
+// still-valid reset token, the new password hash is written, the proof is
+// cleared, the account's security generation is advanced (fencing every session
+// present on an older generation — a login that accepted the old password can
+// no longer insert), and the user's refresh tokens are deleted. Committing all
+// of it together means a reset either fully lands or not at all; a half-applied
+// reset with a spent proof is impossible. The returned generation is the value
+// the newly issued auto-login (or the pending-MFA finalization) must present.
+func (r *UserRepository) ConsumePasswordResetToken(
+	ctx context.Context,
+	token string,
+	newPasswordHash string,
+) (*models.User, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin password reset claim: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var userID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT id FROM users WHERE password_reset_token = $1 AND password_reset_token_expires_at > NOW()`, token).Scan(&userID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrUserNotFound
+		}
+		return nil, fmt.Errorf("resolve password reset owner: %w", err)
+	}
+	if err := sessionlock.Acquire(ctx, tx, userID); err != nil {
+		return nil, err
+	}
+
+	user := &models.User{}
+	query := `
+		SELECT id, email, password_hash, display_name, role, locale, timezone,
+		       email_verified, verification_token, verification_token_expires_at,
+		       password_reset_token, password_reset_token_expires_at,
+		       security_generation, created_at, updated_at
+		FROM users
+		WHERE password_reset_token = $1
+		  AND password_reset_token_expires_at > NOW()
+		FOR UPDATE`
+	err = tx.QueryRow(ctx, query, token).Scan(
+		&user.ID,
+		&user.Email,
+		&user.PasswordHash,
+		&user.DisplayName,
+		&user.Role,
+		&user.Locale,
+		&user.Timezone,
+		&user.EmailVerified,
+		&user.VerificationToken,
+		&user.VerificationTokenExpiresAt,
+		&user.PasswordResetToken,
+		&user.PasswordResetTokenExpiresAt,
+		&user.SecurityGeneration,
+		&user.CreatedAt,
+		&user.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrUserNotFound
+		}
+		return nil, fmt.Errorf("failed to claim user by password reset token: %w", err)
+	}
+
+	resetQuery := `
+		UPDATE users
+		SET password_hash = $2,
+		    password_reset_token = NULL,
+		    password_reset_token_expires_at = NULL,
+		    security_generation = security_generation + 1,
+		    updated_at = NOW()
+		WHERE id = $1
+		RETURNING security_generation`
+	var generation int64
+	if err := tx.QueryRow(ctx, resetQuery, user.ID, newPasswordHash).Scan(&generation); err != nil {
+		return nil, fmt.Errorf("failed to apply password after reset claim: %w", err)
+	}
+	user.SecurityGeneration = generation
+	user.PasswordHash = newPasswordHash
+
+	// Invalidate every refresh token the user holds as part of the same commit,
+	// so no device keeps a session that predates the new password.
+	if _, err := tx.Exec(ctx, `DELETE FROM refresh_tokens WHERE user_id = $1`, user.ID); err != nil {
+		return nil, fmt.Errorf("failed to revoke sessions after password reset: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit password reset claim: %w", err)
+	}
+
+	return user, nil
 }

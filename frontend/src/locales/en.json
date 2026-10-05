@@ -155,11 +155,14 @@
       "requestError": "Failed to send magic link",
       "verifying": "Verifying your magic link...",
       "verifyError": "Failed to verify magic link",
-      "success": "Login successful! Redirecting...",
       "invalidTitle": "Invalid Magic Link",
       "invalid": "This magic link is invalid or has already been used.",
       "expired": "This magic link has expired. Please request a new one.",
-      "missingToken": "No magic link token provided."
+      "missingToken": "Please open the sign-in link from your email again.",
+      "confirmTitle": "Confirm sign-in link",
+      "confirmDescription": "This link proves access to the email account it was sent to. Tap continue to sign in as the linked account.",
+      "confirmButton": "Continue signing in",
+      "accountSwitchWarning": "You are already signed in. Using this link replaces the account currently shown with the account the link was sent to."
     },
     "invalidPassword": "Invalid password",
     "logoutError": "Failed to log out",

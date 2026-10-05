@@ -5,23 +5,38 @@
 package handlers
 
 import (
+	"context"
+	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/whento/pkg/httputil"
 	"github.com/whento/pkg/validator"
 	"github.com/whento/whento/internal/auth/models"
 	"github.com/whento/whento/internal/auth/service"
+	"github.com/whento/whento/internal/auth/sessioncookie"
 )
+
+// PasswordResetService is the handler's domain boundary.
+type PasswordResetService interface {
+	RequestPasswordReset(context.Context, *models.ForgotPasswordRequest) error
+	ResetPassword(context.Context, *models.ResetPasswordRequest) (*models.ResetPasswordResponse, error)
+}
 
 // PasswordResetHandler handles password reset HTTP requests
 type PasswordResetHandler struct {
-	passwordResetService *service.PasswordResetService
+	passwordResetService PasswordResetService
+	logger               *slog.Logger
 }
 
 // NewPasswordResetHandler creates a new password reset handler
-func NewPasswordResetHandler(passwordResetService *service.PasswordResetService) *PasswordResetHandler {
+func NewPasswordResetHandler(passwordResetService PasswordResetService, logger *slog.Logger) *PasswordResetHandler {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &PasswordResetHandler{
 		passwordResetService: passwordResetService,
+		logger:               logger,
 	}
 }
 
@@ -91,20 +106,28 @@ func (h *PasswordResetHandler) ResetPassword(w http.ResponseWriter, r *http.Requ
 
 	resp, err := h.passwordResetService.ResetPassword(r.Context(), &req)
 	if err != nil {
-		httputil.Error(w, http.StatusBadRequest, httputil.ErrCodeBadRequest, err.Error())
+		if errors.Is(err, service.ErrInvalidToken) {
+			httputil.Error(w, http.StatusBadRequest, httputil.ErrCodeBadRequest, "Invalid or expired reset token")
+		} else {
+			h.logger.Error("Password reset failed", "error", err)
+			httputil.Error(w, http.StatusInternalServerError, httputil.ErrCodeInternal, "Unable to reset password. Please try again.")
+		}
 		return
 	}
 
-	// Set refresh token cookie
-	http.SetCookie(w, &http.Cookie{
-		Name:     "refresh_token",
-		Value:    resp.RefreshToken,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
-		SameSite: http.SameSiteStrictMode,
-		MaxAge:   7 * 24 * 60 * 60, // 7 days
-	})
+	// An MFA-protected account gets no session from the reset: the second factor
+	// must complete through the MFA flow first, so no refresh cookie is set and
+	// no refresh token travels in the body.
+	if resp.RequireMFA {
+		httputil.JSON(w, http.StatusOK, resp)
+		return
+	}
+
+	// Set refresh token cookie, with the same lifetime as the JWT it carries.
+	if resp.RefreshToken != "" {
+		sessioncookie.SetRefreshToken(w, r, resp.RefreshToken, resp.RefreshExpiresAt)
+		resp.RefreshToken = ""
+	}
 
 	httputil.JSON(w, http.StatusOK, resp)
 }

@@ -96,7 +96,7 @@ export const routes: RouteRecordRaw[] = [
     meta: { public: true },
   },
   {
-    path: '/auth/magic-link/verify/:token',
+    path: '/auth/magic-link/verify/:token?',
     name: 'magic-link-verify',
     component: () => import('@/views/MagicLinkVerify.vue'),
     meta: { public: true },

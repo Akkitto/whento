@@ -23,6 +23,34 @@ type TimeSlot struct {
 	End   string `json:"end"`
 }
 
+// WeekdayTimesJSON builds the JSON object stored under the `weekdays` key of
+// allowed_hours: {"1":{"start":"09:00","end":"18:00"}, ...}.
+func WeekdayTimesJSON(weekdayTimes map[string]TimeRange) (string, error) {
+	slots := make(map[string]TimeSlot, len(weekdayTimes))
+	for day, timeRange := range weekdayTimes {
+		slots[day] = TimeSlot{Start: timeRange.MinTime, End: timeRange.MaxTime}
+	}
+	jsonBytes, err := json.Marshal(slots)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal weekday times: %w", err)
+	}
+	return string(jsonBytes), nil
+}
+
+// ParseWeekdayTimesJSON decodes a weekdays JSON object back into the
+// map[string]TimeRange representation.
+func ParseWeekdayTimesJSON(jsonValue string) (map[string]TimeRange, error) {
+	var slots map[string]TimeSlot
+	if err := json.Unmarshal([]byte(jsonValue), &slots); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal weekday times: %w", err)
+	}
+	weekdayTimes := make(map[string]TimeRange, len(slots))
+	for day, slot := range slots {
+		weekdayTimes[day] = TimeRange{MinTime: slot.Start, MaxTime: slot.End}
+	}
+	return weekdayTimes, nil
+}
+
 // BuildAllowedHoursJSON creates the JSONB string from separate request fields
 func BuildAllowedHoursJSON(
 	weekdayTimes map[string]TimeRange,

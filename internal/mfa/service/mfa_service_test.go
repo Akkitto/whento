@@ -30,6 +30,9 @@ import (
 var errStore = errors.New("store unavailable")
 
 type fakeMFAStore struct {
+	revoked   []uuid.UUID
+	enableErr error
+
 	mfa *models.UserMFA
 	err error
 
@@ -66,6 +69,21 @@ func (f *fakeMFAStore) Update(_ context.Context, mfa *models.UserMFA) error {
 	return f.updateErr
 }
 
+func (f *fakeMFAStore) EnableAndRevokeSessions(_ context.Context, userID uuid.UUID, secret string, enabledAt time.Time) error {
+	if f.enableErr != nil {
+		return f.enableErr
+	}
+	if f.mfa == nil || f.mfa.Secret != secret || f.mfa.Enabled {
+		return repository.ErrMFANotFound
+	}
+	copy := *f.mfa
+	copy.Enabled = true
+	copy.EnabledAt = &enabledAt
+	f.updated = &copy
+	f.mfa = &copy
+	f.revoked = append(f.revoked, userID)
+	return nil
+}
 func (f *fakeMFAStore) Delete(_ context.Context, userID uuid.UUID) error {
 	f.deleted = userID
 
@@ -86,23 +104,9 @@ func (f *fakeUserLookup) GetByID(context.Context, uuid.UUID) (*authModels.User, 
 	return f.user, nil
 }
 
-type fakeTokenRepo struct {
-	revoked []uuid.UUID
-	err     error
-}
-
-var _ TokenRepository = (*fakeTokenRepo)(nil)
-
-func (f *fakeTokenRepo) DeleteByUserID(_ context.Context, userID uuid.UUID) error {
-	f.revoked = append(f.revoked, userID)
-
-	return f.err
-}
-
 type fixture struct {
 	service *MFAService
 	store   *fakeMFAStore
-	tokens  *fakeTokenRepo
 	userID  uuid.UUID
 }
 
@@ -114,12 +118,10 @@ func newFixture(t *testing.T, mfa *models.UserMFA) *fixture {
 	user.ID = userID
 
 	store := &fakeMFAStore{mfa: mfa}
-	tokens := &fakeTokenRepo{}
 
 	service := &MFAService{
 		repo:       store,
 		userRepo:   &fakeUserLookup{user: user},
-		tokenRepo:  tokens,
 		issuer:     "WhenTo",
 		period:     30,
 		digits:     otp.DigitsSix,
@@ -127,7 +129,7 @@ func newFixture(t *testing.T, mfa *models.UserMFA) *fixture {
 		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
-	return &fixture{service: service, store: store, tokens: tokens, userID: userID}
+	return &fixture{service: service, store: store, userID: userID}
 }
 
 // currentCode produces the code an authenticator app would show right now.
@@ -247,17 +249,15 @@ func TestFinishSetupRevokesExistingSessions(t *testing.T) {
 		t.Fatalf("FinishSetup: %v", err)
 	}
 
-	if len(fixture.tokens.revoked) != 1 || fixture.tokens.revoked[0] != fixture.userID {
-		t.Errorf("refresh tokens revoked for %v, want [%v]", fixture.tokens.revoked, fixture.userID)
+	if len(fixture.store.revoked) != 1 || fixture.store.revoked[0] != fixture.userID {
+		t.Errorf("refresh tokens revoked for %v, want [%v]", fixture.store.revoked, fixture.userID)
 	}
 }
 
-func TestFinishSetupSurvivesARevocationFailure(t *testing.T) {
-	// Enabling MFA has already been written by this point. Failing the whole call
-	// because the revocation failed would leave the user unable to finish setup while
-	// MFA is on — worse than a stale session that is logged and expires on its own.
+func TestFinishSetupFailsWhenRevocationFails(t *testing.T) {
+	// Failure must leave MFA disabled so the same verified setup can be retried.
 	fixture := newFixture(t, nil)
-	fixture.tokens.err = errStore
+	fixture.store.enableErr = errStore
 
 	setup, err := fixture.service.BeginSetup(context.Background(), fixture.userID)
 	if err != nil {
@@ -266,8 +266,11 @@ func TestFinishSetupSurvivesARevocationFailure(t *testing.T) {
 
 	if err := fixture.service.FinishSetup(
 		context.Background(), fixture.userID, currentCode(t, setup.Secret),
-	); err != nil {
-		t.Errorf("FinishSetup failed because revocation did: %v", err)
+	); err == nil {
+		t.Fatal("FinishSetup succeeded without revoking pre-MFA sessions")
+	}
+	if fixture.store.mfa.Enabled {
+		t.Fatal("failed enable changed MFA state")
 	}
 }
 

@@ -38,7 +38,12 @@ func registerAuthRoutes(r chi.Router, d *deps, h *handlers) {
 
 			// Magic link authentication (public)
 			l.on(r, perIP("auth-magic-link-request", 3, 15*time.Minute)).Post("/magic-link/request", h.magicLink.RequestMagicLink)
-			l.on(r, perPathIP("auth-magic-link-verify", 5, 15*time.Minute)).Get("/magic-link/verify/{token}", h.magicLink.VerifyMagicLink)
+			// Verification is deliberately POST and same-origin: a GET link is how an
+			// attack-site link switched an already-authenticated account. The SPA
+			// confirms the link first, then submits this path with an Origin header
+			// and the intent marker; the legacy GET is a read-only 405.
+			l.on(r, perPathIP("auth-magic-link-verify", 10, 15*time.Minute)).Post("/magic-link/verify", h.magicLink.VerifyMagicLink)
+			r.Get("/magic-link/verify/{token}", h.magicLink.VerifyMagicLinkRedirect)
 			r.Get("/magic-link/available", h.magicLink.CheckAvailable)
 
 			// Email verification (public - no auth required)
