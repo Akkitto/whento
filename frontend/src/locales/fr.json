@@ -158,7 +158,7 @@
       "invalidTitle": "Lien magique invalide",
       "invalid": "Ce lien magique est invalide ou a déjà été utilisé.",
       "expired": "Ce lien magique a expiré. Veuillez en demander un nouveau.",
-      "missingToken": "Aucun jeton de lien magique fourni.",
+      "missingToken": "Veuillez rouvrir le lien de connexion reçu par e-mail.",
       "confirmTitle": "Confirmer le lien de connexion",
       "confirmDescription": "Ce lien prouve l'accès au compte email auquel il a été envoyé. Confirmez pour vous connecter au compte lié.",
       "confirmButton": "Continuer la connexion",

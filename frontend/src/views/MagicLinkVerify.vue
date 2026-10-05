@@ -116,6 +116,11 @@ const token = ref('');
 
 onMounted(() => {
   const rawToken = route.params.token as string;
+  // Update both browser state and Router's internal current location. A direct
+  // history.replaceState leaves Router holding the secret URL, which its next
+  // push can copy back into history.state.back. Keep the proof only in memory.
+  const cleanPath = '/auth/magic-link/verify/';
+  router.options.history.replace(cleanPath, { ...history.state, current: cleanPath });
 
   if (!rawToken || rawToken.length !== 64) {
     error.value = t('auth.magicLink.missingToken');
@@ -123,12 +128,6 @@ onMounted(() => {
   }
 
   token.value = rawToken;
-
-  // Keep the token for the confirmation attempt, but scrub it from the visible
-  // history URL so it does not sit in the address bar, in server logs or in
-  // shared-link tools after the page has loaded.
-  const cleanPath = route.path.replace(/\/[^/]+$/, '/');
-  history.replaceState(null, '', cleanPath);
 });
 
 async function confirmVerification() {

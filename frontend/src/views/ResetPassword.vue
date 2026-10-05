@@ -195,7 +195,11 @@ const handleSubmit = async () => {
     // MFA-protected accounts complete the login with their second factor. The
     // password has been changed; the session must not start until the code checks
     // out, exactly as with an MFA-gated login.
-    if (response?.require_mfa && response?.temp_token) {
+    if (response?.require_mfa) {
+      if (!response.temp_token) {
+        error.value = t('auth.resetPassword.error');
+        return;
+      }
       authStore.setTempToken(response.temp_token);
       router.push('/verify-mfa');
       return;
