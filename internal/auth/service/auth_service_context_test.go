@@ -162,7 +162,11 @@ func authEntryPoints() []authEntryPoint {
 	return []authEntryPoint{
 		{
 			name: "Register",
-			invoke: func(_ *testing.T, f *contextFixture, ctx context.Context) error {
+			invoke: func(t *testing.T, f *contextFixture, ctx context.Context) error {
+				// Registration only issues a session once the instance has been
+				// bootstrapped (its first account exists); seed that account so
+				// the test reaches the session-issuance path it asserts on.
+				f.seedUser(t, "existing@example.test", contextTestPassword)
 				_, err := f.service.Register(ctx, &models.RegisterRequest{
 					Email:       "register@example.test",
 					Password:    contextTestPassword,

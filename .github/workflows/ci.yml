@@ -255,6 +255,14 @@ jobs:
       - name: Generate Swagger docs
         run: swag init -g cmd/main.go -o docs/swagger --parseInternal --generatedTime=false
 
+      # The committed password ceiling (maxLength: 72 on all four password
+      # fields) must survive every regeneration; see swagger-contract-check in
+      # the Makefile. This job has everything it needs — Go and the generated
+      # docs — so the contract gate runs here rather than nowhere: the previous
+      # yq-based one declared a tool this job never installed and was skipped.
+      - name: Check password maxLength survives in Swagger docs
+        run: make swagger-contract-check
+
       - name: Upload Swagger docs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -521,6 +529,8 @@ jobs:
     env:
       DATABASE_URL: postgres://test:test@localhost:5432/whento_e2e?sslmode=disable
       REDIS_URL: redis://localhost:6379
+      # Synthetic operator key shared by the fresh backend and its E2E seeder.
+      BOOTSTRAP_KEY: ci-only-bootstrap-key-not-for-production
       # The limiter allows 3 registrations and 60 availability writes per minute per IP.
       # A suite driving a real calendar from one address is exactly the traffic it exists
       # to refuse, so it is turned off for the run rather than paced around.

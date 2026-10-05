@@ -35,6 +35,19 @@ var (
 	ErrRegistrationDisabled = errors.New("new user registration is disabled")
 	ErrEmailNotAllowed      = errors.New("email address is not allowed to register")
 	ErrAccountLocked        = errors.New("too many failed login attempts, try again later")
+	// ErrBootstrapRequired means the instance has never had a user, so ordinary
+	// registration is closed: the first (administrator) account exists only
+	// through POST /api/v1/auth/bootstrap and its boot key (see
+	// BootstrapService). It maps to HTTP 403 with the stable BOOTSTRAP_REQUIRED
+	// code so a client can tell "come back after bootstrap" from every other
+	// registration refusal.
+	ErrBootstrapRequired = errors.New("bootstrap required before registration")
+	// ErrRegistrationState means the durable "has a first user ever been
+	// created" marker could not be read, so the service genuinely does not know
+	// whether registration may proceed. It must never be interpreted as "no
+	// users" — that would reopen the pre-claimed first-user slot on an operator
+	// error — and maps to HTTP 503 so the client can retry.
+	ErrRegistrationState = errors.New("cannot determine whether bootstrapping is required")
 )
 
 const (
@@ -44,9 +57,25 @@ const (
 )
 
 // UserRepository defines the interface for user repository operations. It is
-// deliberately the slice of the repository AuthService actually calls.
+// deliberately the slice of the repository AuthService actually calls — the
+// first-user bootstrap primitives (CreateFirstUser, FirstUserCreated) and the
+// ordinary account reads/writes — and nothing else. In particular the old split
+// role-decision read (DetermineRoleAtomically) is gone so the unsafe
+// count-then-insert pattern it embodies cannot quietly return.
 type UserRepository interface {
 	Create(ctx context.Context, user *models.User) error
+	// CreateFirstUser inserts a user, refusing with ErrFirstUserExists when the
+	// table already has a row, atomically with the emptiness check. The
+	// bootstrap flow uses it so the "first user is the administrator" decision
+	// cannot race a concurrent bootstrap.
+	CreateFirstUser(ctx context.Context, user *models.User) error
+	// FirstUserCreated is the durable "has the instance ever been bootstrapped?"
+	// read (app_state.first_user_created, set transactionally by
+	// CreateFirstUser). Registration gates on it: a fresh instance refuses all
+	// ordinary registrations (ErrBootstrapRequired) until the bootstrap flow has
+	// run. A failure to read the marker is surfaced as ErrRegistrationState,
+	// never interpreted as "no users".
+	FirstUserCreated(ctx context.Context) (bool, error)
 	GetByID(ctx context.Context, id uuid.UUID) (*models.User, error)
 	GetByEmail(ctx context.Context, email string) (*models.User, error)
 	Update(ctx context.Context, user *models.User) error
@@ -61,7 +90,6 @@ type UserRepository interface {
 	List(ctx context.Context) ([]*models.User, error)
 	UpdateRole(ctx context.Context, userID uuid.UUID, role string) error
 	UpdatePassword(ctx context.Context, userID uuid.UUID, passwordHash, previousHash string) error
-	DetermineRoleAtomically(ctx context.Context) (string, error)
 }
 
 // TokenRepository defines the interface for token repository operations
@@ -135,36 +163,47 @@ func NewAuthService(
 	}
 }
 
-// Register creates a new user account.
+// Register creates a new user account — but only on an instance that has
+// already been bootstrapped.
 //
-// The first account of an instance is the administrator and is exempt from the
-// email allow-list. "First" is decided under an advisory lock by
-// DetermineRoleAtomically, so two racing registrations cannot both observe an
-// empty table and both become admin. Non-first users are subject to the
-// registration gate and the email allow-list.
+// The very first account of an instance is exclusively the bootstrap flow's
+// (POST /api/v1/auth/bootstrap, guarded by the one-time boot key); ordinary
+// registration must never re-open that slot, regardless of ALLOWED_REGISTER or
+// the email allow-list. Registration therefore reads the durable
+// app_state.first_user_created marker first: if the instance has never had a
+// user, every registration is refused with ErrBootstrapRequired (403), and only
+// an already-bootstrapped instance proceeds to the ordinary gate (registration
+// enabled + email allow-list) and creates a plain RoleUser.
 func (s *AuthService) Register(ctx context.Context, req *models.RegisterRequest) (*models.AuthResponse, error) {
+	// The durable marker is the one authority for "has this instance ever been
+	// bootstrapped?". A failure to read it means the answer is genuinely
+	// unknown, so it surfaces as ErrRegistrationState (503) — never as "no
+	// users", which would reopen the pre-claimed first-user slot on an operator
+	// error.
+	created, err := s.userRepo.FirstUserCreated(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRegistrationState, err)
+	}
+	if !created {
+		// The instance has no first user yet: registration is not a bootstrap
+		// path. The only admission to a fresh instance is /bootstrap.
+		return nil, ErrBootstrapRequired
+	}
+
+	// Registration off is registration off for *everyone* on a bootstrapped
+	// instance. Checked before the bcrypt hash, so a closed instance is not a
+	// CPU sink.
+	if !s.allowedRegister {
+		return nil, ErrRegistrationDisabled
+	}
+	if !validator.EmailMatches(req.Email, s.allowedEmails) {
+		return nil, ErrEmailNotAllowed
+	}
+
 	// Hash password first (expensive operation, do outside any lock)
 	passwordHash, err := bcrypt.GenerateFromPassword([]byte(req.Password), s.bcryptCost)
 	if err != nil {
 		return nil, fmt.Errorf("failed to hash password: %w", err)
-	}
-
-	// Determine role atomically: count + create in a single call to prevent
-	// TOCTOU race where multiple concurrent requests could all see count=0
-	// and all become admin.
-	role, err := s.userRepo.DetermineRoleAtomically(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to determine role: %w", err)
-	}
-
-	// If not the first user, check registration restrictions
-	if role != models.RoleAdmin {
-		if !s.allowedRegister {
-			return nil, ErrRegistrationDisabled
-		}
-		if !validator.EmailMatches(req.Email, s.allowedEmails) {
-			return nil, ErrEmailNotAllowed
-		}
 	}
 
 	// Determine locale (default to English if not provided)
@@ -173,12 +212,13 @@ func (s *AuthService) Register(ctx context.Context, req *models.RegisterRequest)
 		locale = req.Locale
 	}
 
-	// Create user
+	// Ordinary account: never an administrator. The admin role is created only
+	// by the bootstrap flow.
 	user := &models.User{
 		Email:        req.Email,
 		PasswordHash: string(passwordHash),
 		DisplayName:  req.DisplayName,
-		Role:         role,
+		Role:         models.RoleUser,
 		Locale:       locale,
 		Timezone:     "Europe/Paris",
 	}

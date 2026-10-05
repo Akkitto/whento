@@ -28,7 +28,7 @@ export default defineConfig({
     // path-matched on purpose: environmentMatchGlobs was removed in Vitest 4, and the
     // docblock makes each file's requirement visible where it is read.
     environment: 'node',
-    include: ['src/**/*.test.ts'],
+    include: ['src/**/*.test.ts', 'e2e-backend/fixtures/**/*.test.ts'],
     reporters: ['dot'],
     coverage: {
       provider: 'v8',

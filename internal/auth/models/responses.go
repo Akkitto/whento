@@ -70,3 +70,17 @@ type MagicLinkResponse struct {
 type MagicLinkAvailableResponse struct {
 	Available bool `json:"available"`
 }
+
+// BootstrapStatusResponse is the public, pre-authentication read of the auth
+// domain's capability state. Clients gate their UI on it: a frontend hides the
+// registration button when RegistrationEnabled is false, and an operator — or
+// Ansible — checks NeedsBootstrap before attempting POST /api/v1/auth/bootstrap.
+type BootstrapStatusResponse struct {
+	// NeedsBootstrap is true while the instance has no users yet, which is the
+	// only time the bootstrap endpoint accepts a request.
+	NeedsBootstrap bool `json:"needs_bootstrap"`
+	// RegistrationEnabled mirrors the server's ALLOWED_REGISTER setting. Open
+	// registration and the bootstrap flow are both valid ways to create the
+	// first account; this tells the client which one the UI may offer.
+	RegistrationEnabled bool `json:"registration_enabled"`
+}

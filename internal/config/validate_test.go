@@ -193,6 +193,27 @@ func TestValidateAcceptsAndRefuses(t *testing.T) {
 		{name: "connections that never expire", mutate: func(c *Config) { c.DBMaxConnLifetime = 0 }, wantError: "DB_MAX_CONN_LIFETIME"},
 		{name: "idle connections that never expire", mutate: func(c *Config) { c.DBMaxConnIdleTime = 0 }, wantError: "DB_MAX_CONN_IDLE_TIME"},
 
+		// Bootstrap key. These must mirror the request validator for
+		// POST /api/v1/auth/bootstrap: development accepts a 16–256 key while
+		// production demands 32–256, or a key that passes startup is refused at
+		// the only place it is ever used. The floor is environment-dependent on
+		// purpose; the ceiling is not.
+		{name: "a dev boot key at the floor", mutate: func(c *Config) { c.AppEnv = "development"; c.BootstrapKey = strings.Repeat("a", 16) }},
+		{name: "a dev boot key below the floor", mutate: func(c *Config) { c.AppEnv = "development"; c.BootstrapKey = strings.Repeat("a", 15) }, wantError: "BOOTSTRAP_KEY"},
+		{name: "a production boot key at its floor", mutate: func(c *Config) { c.AppEnv = "production"; c.BootstrapKey = strings.Repeat("a", 32) }},
+		{name: "a production boot key below its floor", mutate: func(c *Config) { c.AppEnv = "production"; c.BootstrapKey = strings.Repeat("a", 31) }, wantError: "BOOTSTRAP_KEY"},
+		{name: "a boot key at the ceiling", mutate: func(c *Config) { c.BootstrapKey = strings.Repeat("a", 256) }},
+		{name: "a boot key above the ceiling", mutate: func(c *Config) { c.BootstrapKey = strings.Repeat("a", 257) }, wantError: "BOOTSTRAP_KEY"},
+		{name: "a generated boot key", mutate: func(c *Config) { c.BootstrapKey = strings.Repeat("a", 64) }},
+		// The key check must count characters (runes) the way the request
+		// validator does, not bytes: 32 CJK characters occupy 96 bytes and are a
+		// valid production key, while 16 CJK characters (48 bytes) are still
+		// below production's floor.
+		{name: "a multibyte boot key at the production floor", mutate: func(c *Config) { c.AppEnv = "production"; c.BootstrapKey = strings.Repeat("密", 32) }},
+		{name: "a multibyte boot key below the production floor", mutate: func(c *Config) { c.AppEnv = "production"; c.BootstrapKey = strings.Repeat("密", 31) }, wantError: "BOOTSTRAP_KEY"},
+		// An empty key means "generate one at startup and log it" — always valid.
+		{name: "an empty boot key means generated at startup", mutate: func(c *Config) { c.AppEnv = "production" }},
+
 		// Production coherence. Only the rules that are wrong in every reading.
 		{
 			name:   "a development instance may use a cheap hash",
