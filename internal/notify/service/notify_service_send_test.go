@@ -43,7 +43,7 @@ func (f *fakeCalendarStore) GetByID(_ context.Context, _ uuid.UUID) (*calendarMo
 	return f.calendar, nil
 }
 
-func (f *fakeCalendarStore) ListWithNotifyConfig(_ context.Context) ([]*calendarModels.Calendar, error) {
+func (f *fakeCalendarStore) ListForReminderScan(_ context.Context) ([]*calendarModels.Calendar, error) {
 	if f.err != nil {
 		return nil, f.err
 	}

@@ -122,7 +122,7 @@ type ReminderJobStore interface {
 // ReminderCalendarStore lists the calendars the scheduler has to inspect, and
 // lets a claimed job's calendar be re-read at delivery time.
 type ReminderCalendarStore interface {
-	ListWithNotifyConfig(ctx context.Context) ([]*calendarModels.Calendar, error)
+	ListForReminderScan(ctx context.Context) ([]*calendarModels.Calendar, error)
 	GetByID(ctx context.Context, id uuid.UUID) (*calendarModels.Calendar, error)
 }
 
@@ -289,7 +289,7 @@ func (s *ReminderScheduler) runOnce(ctx context.Context) {
 // with a live claim is left alone, and a sent or permanently failed job is
 // never revived.
 func (s *ReminderScheduler) enqueueDue(ctx context.Context) {
-	calendars, err := s.calendarRepo.ListWithNotifyConfig(ctx)
+	calendars, err := s.calendarRepo.ListForReminderScan(ctx)
 	if err != nil {
 		s.logger.Error("Failed to list calendars for reminder scan", "error", err)
 		return
