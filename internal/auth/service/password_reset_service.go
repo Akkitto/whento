@@ -228,7 +228,7 @@ func (s *PasswordResetService) ResetPassword(ctx context.Context, req *models.Re
 	user, err := s.userRepo.ConsumePasswordResetToken(ctx, req.Token, string(hashedPassword))
 	if err != nil {
 		if errors.Is(err, repository.ErrUserNotFound) {
-			return nil, fmt.Errorf("invalid or expired reset token")
+			return nil, ErrInvalidToken
 		}
 		return nil, fmt.Errorf("failed to consume password reset token: %w", err)
 	}

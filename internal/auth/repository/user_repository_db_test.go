@@ -207,7 +207,7 @@ func TestUserUpdates(t *testing.T) {
 	})
 
 	t.Run("password", func(t *testing.T) {
-		if err := repo.UpdatePassword(ctx, user.ID, "$2a$04$zzzzzzzzzzzzzzzzzzzzzz"); err != nil {
+		if err := repo.UpdatePassword(ctx, user.ID, "$2a$04$zzzzzzzzzzzzzzzzzzzzzz", user.PasswordHash); err != nil {
 			t.Fatalf("UpdatePassword: %v", err)
 		}
 
@@ -880,7 +880,7 @@ func TestConsumeMagicLinkTokenSingleUse(t *testing.T) {
 		t.Fatalf("SetMagicLinkToken: %v", err)
 	}
 
-	got, err := repo.ConsumeMagicLinkToken(ctx, token)
+	got, err := repo.ConsumeMagicLinkToken(ctx, token, user.SecurityGeneration, nil)
 	if err != nil {
 		t.Fatalf("first consume: %v", err)
 	}
@@ -891,7 +891,7 @@ func TestConsumeMagicLinkTokenSingleUse(t *testing.T) {
 	if _, err := repo.GetByMagicLinkToken(ctx, token); !errors.Is(err, repository.ErrUserNotFound) {
 		t.Errorf("token still resolves after being claimed: %v", err)
 	}
-	if _, err := repo.ConsumeMagicLinkToken(ctx, token); !errors.Is(err, repository.ErrUserNotFound) {
+	if _, err := repo.ConsumeMagicLinkToken(ctx, token, user.SecurityGeneration, nil); !errors.Is(err, repository.ErrUserNotFound) {
 		t.Errorf("second consume = %v, want ErrUserNotFound (single-use)", err)
 	}
 }
@@ -919,7 +919,7 @@ func TestConsumeMagicLinkTokenConcurrent(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		go func() {
 			<-start
-			_, err := repo.ConsumeMagicLinkToken(ctx, token)
+			_, err := repo.ConsumeMagicLinkToken(ctx, token, user.SecurityGeneration, nil)
 			results <- err
 		}()
 	}
@@ -959,7 +959,7 @@ func TestConsumeMagicLinkTokenExpiredMustNotClaim(t *testing.T) {
 	if err := repo.SetMagicLinkToken(ctx, user.ID, token, time.Now().Add(-time.Minute)); err != nil {
 		t.Fatalf("SetMagicLinkToken: %v", err)
 	}
-	if _, err := repo.ConsumeMagicLinkToken(ctx, token); !errors.Is(err, repository.ErrUserNotFound) {
+	if _, err := repo.ConsumeMagicLinkToken(ctx, token, user.SecurityGeneration, nil); !errors.Is(err, repository.ErrUserNotFound) {
 		t.Errorf("consume of an expired token = %v, want ErrUserNotFound", err)
 	}
 }

@@ -221,7 +221,7 @@ func TestPasswordResetSPentProofIsRejected(t *testing.T) {
 		NewPassword: "Newfancypass42!",
 	})
 
-	if err == nil || err.Error() != "invalid or expired reset token" {
+	if !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("error = %v, want the opaque invalid-token error", err)
 	}
 	if resp != nil {

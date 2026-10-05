@@ -8,6 +8,7 @@ import (
 	"errors"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/go-playground/validator/v10"
@@ -30,6 +31,7 @@ func init() {
 	// Register custom validations
 	_ = validate.RegisterValidation("locale", validateLocale)
 	_ = validate.RegisterValidation("strongpassword", validateStrongPassword)
+	_ = validate.RegisterValidation("maxbytes", validateMaxBytes)
 }
 
 // ValidationError represents a validation error
@@ -91,6 +93,8 @@ func getErrorMessage(e validator.FieldError) string {
 		return "must be greater than or equal to " + e.Param()
 	case "lte":
 		return "must be less than or equal to " + e.Param()
+	case "maxbytes":
+		return "must be at most " + e.Param() + " bytes"
 	case "oneof":
 		return "must be one of: " + e.Param()
 	case "timezone":
@@ -109,6 +113,19 @@ func getErrorMessage(e validator.FieldError) string {
 func validateLocale(fl validator.FieldLevel) bool {
 	locale := fl.Field().String()
 	return locale == "fr" || locale == "en"
+}
+
+// validateMaxBytes enforces a ceiling on the *byte* length of a string, the unit
+// bcrypt actually cares about (it rejects inputs over 72 bytes). go-playground's
+// built-in max counts runes for strings, so a password made of multibyte
+// characters could pass `max=72` and then blow up bcrypt with an internal error.
+// This validator must run *before* hashing so the failure is a clean 400.
+func validateMaxBytes(fl validator.FieldLevel) bool {
+	limit, err := strconv.Atoi(fl.Param())
+	if err != nil {
+		return false
+	}
+	return len([]byte(fl.Field().String())) <= limit
 }
 
 // validateStrongPassword validates password complexity

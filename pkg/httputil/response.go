@@ -90,12 +90,13 @@ func DecodeJSON(r *http.Request, target interface{}) error {
 
 // Common error codes
 const (
-	ErrCodeInternal     = "INTERNAL_ERROR"
-	ErrCodeBadRequest   = "BAD_REQUEST"
-	ErrCodeUnauthorized = "UNAUTHORIZED"
-	ErrCodeForbidden    = "FORBIDDEN"
-	ErrCodeNotFound     = "NOT_FOUND"
-	ErrCodeConflict     = "CONFLICT"
-	ErrCodeValidation   = "VALIDATION_ERROR"
-	ErrCodeRateLimited  = "RATE_LIMITED"
+	ErrCodeInternal         = "INTERNAL_ERROR"
+	ErrCodeBadRequest       = "BAD_REQUEST"
+	ErrCodeMethodNotAllowed = "METHOD_NOT_ALLOWED"
+	ErrCodeUnauthorized     = "UNAUTHORIZED"
+	ErrCodeForbidden        = "FORBIDDEN"
+	ErrCodeNotFound         = "NOT_FOUND"
+	ErrCodeConflict         = "CONFLICT"
+	ErrCodeValidation       = "VALIDATION_ERROR"
+	ErrCodeRateLimited      = "RATE_LIMITED"
 )

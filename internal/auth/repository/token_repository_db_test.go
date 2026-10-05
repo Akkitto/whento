@@ -404,20 +404,34 @@ func TestDeleteByUserIDRemovesASuccessorCommittedUnderTheLock(t *testing.T) {
 	}
 	b.ID = uuid.New()
 
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	holdCtx := repository.HoldRotationAfterRead(ctx, entered, release)
+	rotationPool, rotationPID, rotationCtx := dedicatedPool(ctx, t, pool)
+	deletionPool, deletionPID, deletionCtx := dedicatedPool(ctx, t, pool)
+	blocker, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = blocker.Rollback(ctx) }()
+	var blockerPID int
+	if err := blocker.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&blockerPID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := blocker.Exec(ctx, `UPDATE refresh_tokens SET expires_at = expires_at WHERE token_hash = $1`, a.TokenHash); err != nil {
+		t.Fatal(err)
+	}
 	rotErr := make(chan error, 1)
 	go func() {
-		rotErr <- tokens.CommitRotation(holdCtx, a.TokenHash, b, time.Minute)
+		rotErr <- repository.NewTokenRepository(rotationPool).CommitRotation(rotationCtx, a.TokenHash, b, time.Minute)
 	}()
-	<-entered
+	waitForBlocked(ctx, t, pool, rotationPID, blockerPID)
 	delErr := make(chan error, 1)
 	go func() {
-		_, err := tokens.DeleteByUserID(ctx, user.ID)
+		_, err := repository.NewTokenRepository(deletionPool).DeleteByUserID(deletionCtx, user.ID)
 		delErr <- err
 	}()
-	close(release)
+	waitForBlocked(ctx, t, pool, deletionPID, rotationPID)
+	if err := blocker.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
 	if err := <-rotErr; err != nil {
 		t.Fatalf("rotation: %v", err)
 	}
@@ -527,19 +541,11 @@ func TestCreateAfterSecurityRevocationDoesNotPublishASession(t *testing.T) {
 		ExpiresAt: time.Now().Add(24 * time.Hour), FamilyID: "login-family",
 	}
 	pending.ID = uuid.New()
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	holdCtx := repository.HoldCreateBeforeLock(ctx, entered, release)
-	createErr := make(chan error, 1)
-	go func() {
-		createErr <- tokens.Create(holdCtx, pending, 0)
-	}()
-	<-entered
+	// Capture the old generation, then finish revocation before publishing it.
 	if _, err := tokens.DeleteByUserID(ctx, user.ID); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
-	close(release)
-	if err := <-createErr; !errors.Is(err, repository.ErrStaleSecurityGeneration) {
+	if err := tokens.Create(ctx, pending, 0); !errors.Is(err, repository.ErrStaleSecurityGeneration) {
 		t.Fatalf("stale create = %v, want ErrStaleSecurityGeneration", err)
 	}
 	if _, err := tokens.GetByHash(ctx, pending.TokenHash); !errors.Is(err, repository.ErrTokenNotFound) {
@@ -547,42 +553,52 @@ func TestCreateAfterSecurityRevocationDoesNotPublishASession(t *testing.T) {
 	}
 }
 
-// TestConsumeOneTimeIsWonByExactlyOneCaller is the pending-MFA replay guard. The
+// TestPendingMFASessionNonceIsWonByExactlyOneCaller is the pending-MFA replay guard. The
 // consume is a single INSERT ... ON CONFLICT, so a sequential second finalization
 // loses, and concurrent finalizations racing on separate connections lose too —
 // this is the guarantee the cache-based Exists/Set could not provide with Redis
 // absent (NoOpCache) or a check-then-act window open.
-func TestConsumeOneTimeIsWonByExactlyOneCaller(t *testing.T) {
+func TestPendingMFASessionNonceIsWonByExactlyOneCaller(t *testing.T) {
 	pool := dbtest.Pool(t)
 	tokens := repository.NewTokenRepository(pool)
 	ctx := dbtest.Context(t)
+	user := newUser(ctx, t, pool)
+	if err := repository.NewUserRepository(pool).Create(ctx, user); err != nil {
+		t.Fatal(err)
+	}
 
 	digest := repository.HashToken(uuid.NewString())
 	expiresAt := time.Now().Add(5 * time.Minute)
+	dbtest.CleanupContext(ctx, t, pool, `DELETE FROM mfa_pending_nonce WHERE digest = $1`, digest)
 
-	won, err := tokens.ConsumeOneTime(ctx, digest, expiresAt)
+	won, err := tokens.CreatePendingMFASession(ctx, digest, expiresAt, pendingSession(user.ID), user.SecurityGeneration)
 	if err != nil {
-		t.Fatalf("ConsumeOneTime: %v", err)
+		t.Fatalf("CreatePendingMFASession: %v", err)
 	}
 	if !won {
 		t.Fatal("the first finalization did not consume the pending token")
 	}
 
-	again, err := tokens.ConsumeOneTime(ctx, digest, expiresAt)
+	again, err := tokens.CreatePendingMFASession(ctx, digest, expiresAt, pendingSession(user.ID), user.SecurityGeneration)
 	if err != nil {
-		t.Fatalf("ConsumeOneTime (second): %v", err)
+		t.Fatalf("CreatePendingMFASession (second): %v", err)
 	}
 	if again {
 		t.Error("a second finalization of the same pending token also won")
 	}
 }
 
-func TestConsumeOneTimeConcurrentFinalizationsHaveOneWinner(t *testing.T) {
-	dbtest.Pool(t) // require the database up front; goroutines build their own pools
+func TestPendingMFASessionNonceConcurrentFinalizationsHaveOneWinner(t *testing.T) {
+	pool := dbtest.Pool(t)
 	ctx := dbtest.Context(t)
+	user := newUser(ctx, t, pool)
+	if err := repository.NewUserRepository(pool).Create(ctx, user); err != nil {
+		t.Fatal(err)
+	}
 
 	digest := repository.HashToken(uuid.NewString())
 	expiresAt := time.Now().Add(5 * time.Minute)
+	dbtest.CleanupContext(ctx, t, pool, `DELETE FROM mfa_pending_nonce WHERE digest = $1`, digest)
 
 	start := make(chan struct{})
 	results := make(chan bool, 2)
@@ -606,9 +622,9 @@ func TestConsumeOneTimeConcurrentFinalizationsHaveOneWinner(t *testing.T) {
 			defer connPool.Close()
 			r := repository.NewTokenRepository(connPool)
 			<-start
-			won, err := r.ConsumeOneTime(ctx, digest, expiresAt)
+			won, err := r.CreatePendingMFASession(ctx, digest, expiresAt, pendingSession(user.ID), user.SecurityGeneration)
 			if err != nil {
-				t.Errorf("ConsumeOneTime: %v", err)
+				t.Errorf("CreatePendingMFASession: %v", err)
 				results <- false
 				return
 			}
@@ -835,4 +851,10 @@ func TestCreatePendingMFASessionUnrelatedNonceCleanupLockMustNotAbortLogin(t *te
 	if err := pool.QueryRow(ctx, `SELECT 1 FROM refresh_tokens WHERE id = $1`, token.ID).Scan(new(int)); err != nil {
 		t.Errorf("the session was not stored: %v", err)
 	}
+}
+
+func pendingSession(userID uuid.UUID) *models.RefreshToken {
+	token := &models.RefreshToken{UserID: userID, TokenHash: repository.HashToken(uuid.NewString()), ExpiresAt: time.Now().Add(time.Hour), FamilyID: uuid.NewString()}
+	token.ID = uuid.New()
+	return token
 }

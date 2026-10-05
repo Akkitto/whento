@@ -60,7 +60,7 @@ type UserRepository interface {
 	Delete(ctx context.Context, id uuid.UUID) error
 	List(ctx context.Context) ([]*models.User, error)
 	UpdateRole(ctx context.Context, userID uuid.UUID, role string) error
-	UpdatePassword(ctx context.Context, userID uuid.UUID, passwordHash string) error
+	UpdatePassword(ctx context.Context, userID uuid.UUID, passwordHash, previousHash string) error
 	DetermineRoleAtomically(ctx context.Context) (string, error)
 }
 
@@ -440,15 +440,12 @@ func (s *AuthService) ChangePassword(ctx context.Context, userID string, req *mo
 		return fmt.Errorf("failed to hash password: %w", err)
 	}
 
-	// Update password
-	if err := s.userRepo.UpdatePassword(ctx, uid, string(newPasswordHash)); err != nil {
+	// Change the verified password and revoke sessions in one transaction.
+	if err := s.userRepo.UpdatePassword(ctx, uid, string(newPasswordHash), user.PasswordHash); err != nil {
+		if errors.Is(err, repository.ErrStaleSecurityGeneration) {
+			return ErrPasswordMismatch
+		}
 		return fmt.Errorf("failed to update password: %w", err)
-	}
-
-	// Invalidate all refresh tokens and fence any login that already accepted
-	// the old password but has not yet inserted its session.
-	if _, err := s.tokenRepo.DeleteByUserID(ctx, uid); err != nil {
-		return fmt.Errorf("failed to revoke sessions: %w", err)
 	}
 
 	// Invalidate all active access tokens by recording password change time

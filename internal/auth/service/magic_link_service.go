@@ -39,7 +39,6 @@ var magicLinkTranslationsJSON string
 
 type MagicLinkService struct {
 	userRepo     *repository.UserRepository
-	tokenRepo    *repository.TokenRepository
 	mfaRepo      MFARepository
 	emailService *email.Service
 	jwtManager   *jwt.Manager
@@ -51,7 +50,6 @@ type MagicLinkService struct {
 
 func NewMagicLinkService(
 	userRepo *repository.UserRepository,
-	tokenRepo *repository.TokenRepository,
 	mfaRepo MFARepository,
 	emailService *email.Service,
 	jwtManager *jwt.Manager,
@@ -72,7 +70,6 @@ func NewMagicLinkService(
 
 	return &MagicLinkService{
 		userRepo:     userRepo,
-		tokenRepo:    tokenRepo,
 		mfaRepo:      mfaRepo,
 		emailService: emailService,
 		jwtManager:   jwtManager,
@@ -133,13 +130,12 @@ func (s *MagicLinkService) RequestMagicLink(ctx context.Context, email string) e
 // the normal MFA flow. An infrastructure error in the MFA lookup is not treated
 // as "MFA disabled" — finalizing without the second factor would be a bypass.
 func (s *MagicLinkService) VerifyMagicLink(ctx context.Context, token string) (*models.AuthResponse, error) {
-	// Claim the token atomically: the select and the clear commit together, so a
-	// racing verifier cannot both see a live token. A failed claim leaves the
-	// proof in place; the link stays usable.
-	user, err := s.userRepo.ConsumeMagicLinkToken(ctx, token)
+	// Prepare the response without spending the proof. The final claim checks
+	// the captured generation and commits the session insert atomically.
+	user, err := s.userRepo.GetByMagicLinkToken(ctx, token)
 	if err != nil {
 		if errors.Is(err, repository.ErrUserNotFound) {
-			return nil, fmt.Errorf("invalid or expired magic link")
+			return nil, ErrInvalidToken
 		}
 		return nil, fmt.Errorf("failed to claim magic link token: %w", err)
 	}
@@ -156,6 +152,12 @@ func (s *MagicLinkService) VerifyMagicLink(ctx context.Context, token string) (*
 		tempToken, err := pendingMFAToken(s.jwtManager, user.ID, user.SecurityGeneration)
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate temp token: %w", err)
+		}
+		if _, err := s.userRepo.ConsumeMagicLinkToken(ctx, token, user.SecurityGeneration, nil); err != nil {
+			if errors.Is(err, repository.ErrUserNotFound) {
+				return nil, ErrInvalidToken
+			}
+			return nil, fmt.Errorf("finalize MFA magic link: %w", err)
 		}
 		return &models.AuthResponse{
 			RequireMFA: true,
@@ -184,8 +186,11 @@ func (s *MagicLinkService) VerifyMagicLink(ctx context.Context, token string) (*
 	}
 	storedToken.ID = uuid.New()
 
-	if err := s.tokenRepo.Create(ctx, storedToken, user.SecurityGeneration); err != nil {
-		return nil, fmt.Errorf("failed to store refresh token: %w", err)
+	if _, err := s.userRepo.ConsumeMagicLinkToken(ctx, token, user.SecurityGeneration, storedToken); err != nil {
+		if errors.Is(err, repository.ErrUserNotFound) {
+			return nil, ErrInvalidToken
+		}
+		return nil, fmt.Errorf("finalize magic link session: %w", err)
 	}
 
 	// Build auth response

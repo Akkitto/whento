@@ -100,7 +100,7 @@ func (m *mockUserRepository) UpdateRole(ctx context.Context, userID uuid.UUID, r
 	return m.err
 }
 
-func (m *mockUserRepository) UpdatePassword(ctx context.Context, userID uuid.UUID, passwordHash string) error {
+func (m *mockUserRepository) UpdatePassword(ctx context.Context, userID uuid.UUID, passwordHash, previousHash string) error {
 	return m.err
 }
 

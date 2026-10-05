@@ -5,6 +5,9 @@
 package handlers
 
 import (
+	"context"
+	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/whento/pkg/httputil"
@@ -14,15 +17,26 @@ import (
 	"github.com/whento/whento/internal/auth/sessioncookie"
 )
 
+// PasswordResetService is the handler's domain boundary.
+type PasswordResetService interface {
+	RequestPasswordReset(context.Context, *models.ForgotPasswordRequest) error
+	ResetPassword(context.Context, *models.ResetPasswordRequest) (*models.ResetPasswordResponse, error)
+}
+
 // PasswordResetHandler handles password reset HTTP requests
 type PasswordResetHandler struct {
-	passwordResetService *service.PasswordResetService
+	passwordResetService PasswordResetService
+	logger               *slog.Logger
 }
 
 // NewPasswordResetHandler creates a new password reset handler
-func NewPasswordResetHandler(passwordResetService *service.PasswordResetService) *PasswordResetHandler {
+func NewPasswordResetHandler(passwordResetService PasswordResetService, logger *slog.Logger) *PasswordResetHandler {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &PasswordResetHandler{
 		passwordResetService: passwordResetService,
+		logger:               logger,
 	}
 }
 
@@ -92,7 +106,12 @@ func (h *PasswordResetHandler) ResetPassword(w http.ResponseWriter, r *http.Requ
 
 	resp, err := h.passwordResetService.ResetPassword(r.Context(), &req)
 	if err != nil {
-		httputil.Error(w, http.StatusBadRequest, httputil.ErrCodeBadRequest, err.Error())
+		if errors.Is(err, service.ErrInvalidToken) {
+			httputil.Error(w, http.StatusBadRequest, httputil.ErrCodeBadRequest, "Invalid or expired reset token")
+		} else {
+			h.logger.Error("Password reset failed", "error", err)
+			httputil.Error(w, http.StatusInternalServerError, httputil.ErrCodeInternal, "Unable to reset password. Please try again.")
+		}
 		return
 	}
 

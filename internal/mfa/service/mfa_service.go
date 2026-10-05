@@ -35,11 +35,6 @@ var (
 	ErrAllBackupCodesUsed = errors.New("all backup codes have been used")
 )
 
-// TokenRepository defines the interface for revoking refresh tokens when MFA is enabled
-type TokenRepository interface {
-	DeleteByUserID(ctx context.Context, userID uuid.UUID) (int64, error)
-}
-
 // MFAStore is the slice of the MFA repository this service needs.
 //
 // Declared here rather than taking *repository.MFARepository directly so the service
@@ -50,6 +45,7 @@ type MFAStore interface {
 	Create(ctx context.Context, mfa *models.UserMFA) error
 	GetByUserID(ctx context.Context, userID uuid.UUID) (*models.UserMFA, error)
 	Update(ctx context.Context, mfa *models.UserMFA) error
+	EnableAndRevokeSessions(ctx context.Context, userID uuid.UUID, secret string, enabledAt time.Time) error
 	Delete(ctx context.Context, userID uuid.UUID) error
 }
 
@@ -62,7 +58,6 @@ type UserLookup interface {
 type MFAService struct {
 	repo       MFAStore
 	userRepo   UserLookup
-	tokenRepo  TokenRepository
 	issuer     string
 	period     uint
 	digits     otp.Digits
@@ -97,14 +92,12 @@ func totpDigits(configured uint) otp.Digits {
 func NewMFAService(
 	repo MFAStore,
 	userRepo UserLookup,
-	tokenRepo TokenRepository,
 	cfg *config.Config,
 	logger *slog.Logger,
 ) *MFAService {
 	return &MFAService{
 		repo:       repo,
 		userRepo:   userRepo,
-		tokenRepo:  tokenRepo,
 		issuer:     cfg.TOTPIssuer,
 		period:     cfg.TOTPPeriod,
 		digits:     totpDigits(cfg.TOTPDigits),
@@ -216,20 +209,12 @@ func (s *MFAService) FinishSetup(ctx context.Context, userID uuid.UUID, code str
 		return ErrInvalidCode
 	}
 
-	// Enable MFA
-	now := time.Now()
-	mfa.Enabled = true
-	mfa.EnabledAt = &now
-
-	if err := s.repo.Update(ctx, mfa); err != nil {
-		return fmt.Errorf("failed to enable MFA: %w", err)
+	if mfa.Enabled {
+		return ErrMFAAlreadyEnabled
 	}
-
-	// Revoke all existing refresh tokens so pre-MFA sessions cannot bypass MFA
-	if s.tokenRepo != nil {
-		if _, err := s.tokenRepo.DeleteByUserID(ctx, userID); err != nil {
-			return fmt.Errorf("failed to revoke sessions after MFA enable: %w", err)
-		}
+	// Enable only the secret whose code was verified, together with the session fence.
+	if err := s.repo.EnableAndRevokeSessions(ctx, userID, mfa.Secret, time.Now()); err != nil {
+		return fmt.Errorf("failed to enable MFA and revoke sessions: %w", err)
 	}
 
 	return nil

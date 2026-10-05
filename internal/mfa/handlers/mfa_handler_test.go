@@ -74,6 +74,16 @@ func (f *fakeMFAStore) Update(_ context.Context, mfa *models.UserMFA) error {
 	return f.writeErr
 }
 
+func (f *fakeMFAStore) EnableAndRevokeSessions(_ context.Context, _ uuid.UUID, _ string, enabledAt time.Time) error {
+	if f.writeErr != nil {
+		return f.writeErr
+	}
+	copy := *f.record
+	copy.Enabled = true
+	copy.EnabledAt = &enabledAt
+	f.updated = &copy
+	return nil
+}
 func (f *fakeMFAStore) Delete(context.Context, uuid.UUID) error {
 	f.deleted = true
 
@@ -92,10 +102,6 @@ func (f *fakeUserLookup) GetByID(context.Context, uuid.UUID) (*authModels.User, 
 
 	return f.user, nil
 }
-
-type fakeTokenRepo struct{ err error }
-
-func (f *fakeTokenRepo) DeleteByUserID(context.Context, uuid.UUID) (int64, error) { return 0, f.err }
 
 // countingCache records what the handler asks of it so the lockout can be observed
 // without a Redis instance.
@@ -212,7 +218,7 @@ func newHarness(t *testing.T, store *fakeMFAStore, users *fakeUserLookup, appCac
 	cfg := &config.Config{TOTPIssuer: "WhenTo", TOTPPeriod: 30, TOTPDigits: 6, BcryptCost: bcrypt.MinCost}
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	mfaSvc := service.NewMFAService(store, users, &fakeTokenRepo{}, cfg, discard)
+	mfaSvc := service.NewMFAService(store, users, cfg, discard)
 	tokensStub := &stubAuthTokenRepo{}
 	authUsersStub := &stubAuthUserRepo{user: users.user}
 	authSvc := authService.NewAuthService(
@@ -281,10 +287,12 @@ func (s *stubAuthUserRepo) UpdateProfile(
 ) (*authModels.User, error) {
 	return s.user, nil
 }
-func (s *stubAuthUserRepo) Delete(context.Context, uuid.UUID) error                 { return nil }
-func (s *stubAuthUserRepo) List(context.Context) ([]*authModels.User, error)        { return nil, nil }
-func (s *stubAuthUserRepo) UpdateRole(context.Context, uuid.UUID, string) error     { return nil }
-func (s *stubAuthUserRepo) UpdatePassword(context.Context, uuid.UUID, string) error { return nil }
+func (s *stubAuthUserRepo) Delete(context.Context, uuid.UUID) error             { return nil }
+func (s *stubAuthUserRepo) List(context.Context) ([]*authModels.User, error)    { return nil, nil }
+func (s *stubAuthUserRepo) UpdateRole(context.Context, uuid.UUID, string) error { return nil }
+func (s *stubAuthUserRepo) UpdatePassword(context.Context, uuid.UUID, string, string) error {
+	return nil
+}
 
 type stubAuthTokenRepo struct {
 	created *authModels.RefreshToken

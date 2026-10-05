@@ -41,6 +41,8 @@ var errStore = errors.New("store unavailable")
 // --- hand-written repositories -------------------------------------------------
 
 type fakeUserRepo struct {
+	passwordChanged func(context.Context, uuid.UUID) error
+
 	byEmail map[string]*models.User
 	byID    map[uuid.UUID]*models.User
 
@@ -175,9 +177,22 @@ func (f *fakeUserRepo) UpdateRole(_ context.Context, _ uuid.UUID, role string) e
 	return f.roleSetErr
 }
 
-func (f *fakeUserRepo) UpdatePassword(_ context.Context, _ uuid.UUID, hash string) error {
+func (f *fakeUserRepo) UpdatePassword(ctx context.Context, userID uuid.UUID, hash, previousHash string) error {
+	user := f.byID[userID]
+	if user == nil {
+		return repository.ErrUserNotFound
+	}
+	if user.PasswordHash != previousHash {
+		return repository.ErrStaleSecurityGeneration
+	}
+	if f.passwordChanged != nil {
+		if err := f.passwordChanged(ctx, userID); err != nil {
+			return err
+		}
+	}
 	f.passwordUpdated = hash
-
+	user.PasswordHash = hash
+	user.SecurityGeneration++
 	return nil
 }
 
@@ -489,6 +504,7 @@ func newFixture(t *testing.T, configure func(*options)) *fixture {
 	users := newFakeUserRepo()
 	users.role = opts.nextRole
 	tokens := newFakeTokenRepo()
+	users.passwordChanged = func(ctx context.Context, id uuid.UUID) error { _, err := tokens.DeleteByUserID(ctx, id); return err }
 	mfa := &fakeMFARepo{mfa: opts.mfa}
 	appCache := newCountingCache()
 

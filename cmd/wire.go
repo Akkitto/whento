@@ -147,7 +147,7 @@ func buildHandlers(d *deps) (*handlers, error) {
 	// temporary-token replay prevention.
 	authSvc := authService.NewAuthService(userRepo, tokenRepo, mfaRepository, d.jwtManager, d.cacheStore, d.cfg.BcryptCost, d.cfg.AllowedRegister, d.cfg.AllowedEmails)
 	passwordResetSvc := authService.NewPasswordResetService(userRepo, tokenRepo, mfaRepository, d.mailer, d.jwtManager, d.cfg, d.log, d.cfg.BcryptCost)
-	magicLinkSvc := authService.NewMagicLinkService(userRepo, tokenRepo, mfaRepository, d.mailer, d.jwtManager, d.cfg, d.log)
+	magicLinkSvc := authService.NewMagicLinkService(userRepo, mfaRepository, d.mailer, d.jwtManager, d.cfg, d.log)
 
 	// ========== PASSKEY MODULE ==========
 	passkeyRepository := passkeyRepo.NewPasskeyRepository(d.pool)
@@ -162,7 +162,7 @@ func buildHandlers(d *deps) (*handlers, error) {
 	passkeyHandler := passkeyHandlers.NewPasskeyHandler(passkeySvc, authSvc, d.log)
 
 	// ========== MFA MODULE ==========
-	mfaSvc := mfaService.NewMFAService(mfaRepository, userRepo, tokenRepo, d.cfg, d.log)
+	mfaSvc := mfaService.NewMFAService(mfaRepository, userRepo, d.cfg, d.log)
 	d.log.Info("MFA service initialized")
 
 	mfaHandler := mfaHandlers.NewMFAHandler(mfaSvc, authSvc, d.jwtManager, d.cacheStore, d.log)
@@ -231,7 +231,7 @@ func buildHandlers(d *deps) (*handlers, error) {
 	return &handlers{
 		health:        authHandlers.NewHealthHandler(d.pool, d.cacheProbe),
 		auth:          authHandler,
-		passwordReset: authHandlers.NewPasswordResetHandler(passwordResetSvc),
+		passwordReset: authHandlers.NewPasswordResetHandler(passwordResetSvc, d.log),
 		magicLink:     authHandlers.NewMagicLinkHandler(magicLinkSvc, d.mailer, d.log, magicLinkTrustedOrigins(d.cfg)),
 		adminMFA:      authHandlers.NewAdminMFAHandler(mfaSvc, d.log),
 

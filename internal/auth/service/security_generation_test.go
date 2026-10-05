@@ -101,6 +101,7 @@ func TestLoginDoesNotPublishASessionAfterPasswordChange(t *testing.T) {
 		entered:       entered,
 		release:       release,
 	}
+	users.passwordChanged = func(ctx context.Context, id uuid.UUID) error { _, err := tokens.DeleteByUserID(ctx, id); return err }
 	svc := NewAuthService(users, tokens, &fakeMFARepo{}, testJWT(t), cache.NewRedisCache(nil), bcrypt.MinCost, true, nil)
 
 	loginErr := make(chan error, 1)
@@ -171,6 +172,7 @@ func TestPendingMFATokenRefusedAfterPasswordChange(t *testing.T) {
 	users := newFakeUserRepo()
 	users.add(user)
 	svc, tokens := mfaService(t, users, &fenceTokens{fakeTokenRepo: *newFakeTokenRepo(), generation: 4}, true)
+	users.passwordChanged = func(ctx context.Context, id uuid.UUID) error { _, err := tokens.DeleteByUserID(ctx, id); return err }
 
 	login, err := svc.Login(context.Background(), &models.LoginRequest{Email: user.Email, Password: "current-password"})
 	if err != nil {
@@ -338,7 +340,7 @@ func TestPendingMFATokenCannotFinalizeTwiceWithoutRedis(t *testing.T) {
 
 // The nonce consume is atomic under concurrency: when two finalizations of the
 // same pending token race, exactly one wins the INSERT ... ON CONFLICT and mints a
-// session. fenceTokens is backed by the in-memory fake, whose ConsumeOneTime mirrors
+// session. fenceTokens is backed by the in-memory fake, whose nonce claim mirrors
 // the database's compare-and-set.
 func TestPendingMFATokenRacingFinalizationMintsOneSession(t *testing.T) {
 	user := mfaUserWithPassword(t, "race@example.test", "current-password", 4)

@@ -16,6 +16,7 @@ import (
 
 	"github.com/whento/pkg/dberr"
 	"github.com/whento/whento/internal/auth/models"
+	"github.com/whento/whento/internal/auth/sessionlock"
 )
 
 var (
@@ -236,23 +237,35 @@ func (r *UserRepository) Update(ctx context.Context, user *models.User) error {
 	return nil
 }
 
-// UpdatePassword updates a user's password
-func (r *UserRepository) UpdatePassword(ctx context.Context, userID uuid.UUID, passwordHash string) error {
+// UpdatePassword changes the verified password and revokes sessions atomically.
+// Matching the previously verified hash prevents a concurrent reset from being
+// overwritten by a request authenticated against the old password.
+func (r *UserRepository) UpdatePassword(ctx context.Context, userID uuid.UUID, passwordHash, previousHash string) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin password change: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := sessionlock.Acquire(ctx, tx, userID); err != nil {
+		return err
+	}
 	query := `
 		UPDATE users
-		SET password_hash = $2, updated_at = NOW()
-		WHERE id = $1`
+		SET password_hash = $2, security_generation = security_generation + 1, updated_at = NOW()
+		WHERE id = $1 AND password_hash = $3`
 
-	result, err := r.pool.Exec(ctx, query, userID, passwordHash)
+	result, err := tx.Exec(ctx, query, userID, passwordHash, previousHash)
 	if err != nil {
 		return fmt.Errorf("failed to update password: %w", err)
 	}
 
 	if result.RowsAffected() == 0 {
-		return ErrUserNotFound
+		return ErrStaleSecurityGeneration
 	}
-
-	return nil
+	if _, err := tx.Exec(ctx, `DELETE FROM refresh_tokens WHERE user_id = $1`, userID); err != nil {
+		return fmt.Errorf("revoke sessions after password change: %w", err)
+	}
+	return tx.Commit(ctx)
 }
 
 // UpdateRole updates a user's role
@@ -774,20 +787,29 @@ func (r *UserRepository) ClearMagicLinkToken(ctx context.Context, userID uuid.UU
 	return nil
 }
 
-// ConsumeMagicLinkToken claims a magic link token atomically and returns the
-// user it belonged to. Selecting the row FOR UPDATE and clearing it in the same
-// transaction is the single-use enforcement: concurrent verifications queue on
-// the row lock, and the first to claim it commits the clear, so the second
-// re-read finds no matching token and gets ErrUserNotFound. The former
-// consume pattern was two independent statements (a SELECT followed by a
-// separate clear whose failure was logged and ignored), which let a racing
-// verifier and a racing clear both see a live token.
-func (r *UserRepository) ConsumeMagicLinkToken(ctx context.Context, token string) (*models.User, error) {
+// ConsumeMagicLinkToken finalizes a prepared mailbox login under the session
+// lock. It revalidates the proof and captured security generation, then clears
+// the proof and inserts the optional refresh session in the same transaction.
+// Any failure leaves the proof usable; concurrent finalizations have one winner.
+func (r *UserRepository) ConsumeMagicLinkToken(ctx context.Context, token string, securityGeneration int64, session *models.RefreshToken) (*models.User, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin magic link claim: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Resolve without a row lock, acquire the session lock, then revalidate the
+	// proof under FOR UPDATE. Every credential transition uses this lock order.
+	var userID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT id FROM users WHERE magic_link_token = $1 AND magic_link_token_expires_at > NOW()`, token).Scan(&userID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrUserNotFound
+		}
+		return nil, fmt.Errorf("resolve magic link owner: %w", err)
+	}
+	if err := sessionlock.Acquire(ctx, tx, userID); err != nil {
+		return nil, err
+	}
 
 	user := &models.User{}
 	query := `
@@ -825,6 +847,12 @@ func (r *UserRepository) ConsumeMagicLinkToken(ctx context.Context, token string
 		}
 		return nil, fmt.Errorf("failed to claim user by magic link token: %w", err)
 	}
+	if user.SecurityGeneration != securityGeneration {
+		return nil, ErrStaleSecurityGeneration
+	}
+	if session != nil && session.UserID != user.ID {
+		return nil, ErrUserNotFound
+	}
 
 	if _, err := tx.Exec(ctx, `
 		UPDATE users
@@ -833,6 +861,16 @@ func (r *UserRepository) ConsumeMagicLinkToken(ctx context.Context, token string
 		    updated_at = NOW()
 		WHERE id = $1`, user.ID); err != nil {
 		return nil, fmt.Errorf("failed to clear claimed magic link token: %w", err)
+	}
+
+	// Token signing and the MFA lookup happen before claiming the proof. The
+	// final session insert shares this transaction, so an insert failure leaves
+	// the email link usable and concurrent finalizations still have one winner.
+	if session != nil {
+		if err := tx.QueryRow(ctx, `INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at, family_id) VALUES ($1, $2, $3, $4, $5) RETURNING created_at`,
+			session.ID, session.UserID, session.TokenHash, session.ExpiresAt, session.FamilyID).Scan(&session.CreatedAt); err != nil {
+			return nil, fmt.Errorf("insert magic link session: %w", err)
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -864,6 +902,17 @@ func (r *UserRepository) ConsumePasswordResetToken(
 		return nil, fmt.Errorf("begin password reset claim: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	var userID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT id FROM users WHERE password_reset_token = $1 AND password_reset_token_expires_at > NOW()`, token).Scan(&userID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrUserNotFound
+		}
+		return nil, fmt.Errorf("resolve password reset owner: %w", err)
+	}
+	if err := sessionlock.Acquire(ctx, tx, userID); err != nil {
+		return nil, err
+	}
 
 	user := &models.User{}
 	query := `
@@ -913,6 +962,7 @@ func (r *UserRepository) ConsumePasswordResetToken(
 		return nil, fmt.Errorf("failed to apply password after reset claim: %w", err)
 	}
 	user.SecurityGeneration = generation
+	user.PasswordHash = newPasswordHash
 
 	// Invalidate every refresh token the user holds as part of the same commit,
 	// so no device keeps a session that predates the new password.
@@ -926,9 +976,3 @@ func (r *UserRepository) ConsumePasswordResetToken(
 
 	return user, nil
 }
-
-// ConsumeMagicLinkToken claims a magic link token atomically and returns the
-// user it belonged to. Selecting the row FOR UPDATE and clearing it in the same
-// transaction is the single-use enforcement: concurrent verifications queue on
-// the row lock, and the first to claim it commits the clear, so the second
-// re-read finds no matching token and gets ErrUserNotFound.

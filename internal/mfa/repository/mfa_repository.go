@@ -8,11 +8,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/whento/whento/internal/auth/sessionlock"
 	"github.com/whento/whento/internal/mfa/models"
 )
 
@@ -88,7 +90,7 @@ func (r *MFARepository) Update(ctx context.Context, mfa *models.UserMFA) error {
 	query := `
 		UPDATE user_mfa
 		SET enabled = $1, secret = $2, backup_codes = $3, backup_codes_used = $4, enabled_at = $5
-		WHERE user_id = $6
+		WHERE user_id = $6 AND (NOT enabled OR (enabled = $1 AND secret = $2))
 	`
 
 	result, err := r.pool.Exec(ctx, query,
@@ -141,4 +143,36 @@ func (r *MFARepository) IsEnabled(ctx context.Context, userID uuid.UUID) (bool, 
 	}
 
 	return enabled, nil
+}
+
+// EnableAndRevokeSessions enables the verified secret, advances the security
+// generation and deletes old sessions in one commit. The expected secret is
+// checked again so a concurrent setup cannot enable an unverified replacement.
+func (r *MFARepository) EnableAndRevokeSessions(ctx context.Context, userID uuid.UUID, secret string, enabledAt time.Time) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin MFA enable: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := sessionlock.Acquire(ctx, tx, userID); err != nil {
+		return err
+	}
+	var id uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT id FROM users WHERE id = $1 FOR UPDATE`, userID).Scan(&id); err != nil {
+		return fmt.Errorf("lock MFA owner: %w", err)
+	}
+	result, err := tx.Exec(ctx, `UPDATE user_mfa SET enabled = TRUE, enabled_at = $3 WHERE user_id = $1 AND secret = $2 AND NOT enabled`, userID, secret, enabledAt)
+	if err != nil {
+		return fmt.Errorf("enable MFA: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		return ErrMFANotFound
+	}
+	if _, err := tx.Exec(ctx, `UPDATE users SET security_generation = security_generation + 1 WHERE id = $1`, userID); err != nil {
+		return fmt.Errorf("advance MFA generation: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM refresh_tokens WHERE user_id = $1`, userID); err != nil {
+		return fmt.Errorf("revoke sessions after MFA enable: %w", err)
+	}
+	return tx.Commit(ctx)
 }

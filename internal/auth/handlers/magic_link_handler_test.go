@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/whento/whento/internal/auth/models"
+	"github.com/whento/whento/internal/auth/service"
 	securecookie "github.com/whento/whento/internal/auth/sessioncookie"
 	"github.com/whento/whento/internal/testutil"
 )
@@ -209,7 +210,7 @@ func TestVerifyMagicLinkRejectsAnInvalidTokenSyntax(t *testing.T) {
 // TestVerifyMagicLinkSetsNoCookieWhenTheServiceRefuses: a rejected link is a
 // failed login and must leave the browser with no session cookie.
 func TestVerifyMagicLinkSetsNoCookieWhenTheServiceRefuses(t *testing.T) {
-	svc := &stubMagicLinkService{err: errors.New("invalid or expired magic link")}
+	svc := &stubMagicLinkService{err: service.ErrInvalidToken}
 	h := newMagicLinkHandler(svc, true)
 
 	rec := httptest.NewRecorder()
@@ -276,6 +277,9 @@ func TestVerifyMagicLinkGETIsReadOnly(t *testing.T) {
 	}
 	if got := rec.Header().Get("Allow"); got != http.MethodPost {
 		t.Errorf("Allow = %q, want POST", got)
+	}
+	if !strings.Contains(rec.Body.String(), "METHOD_NOT_ALLOWED") {
+		t.Errorf("wrong API error code: %s", rec.Body.String())
 	}
 	if svc.called {
 		t.Error("the read-only GET must not touch the service (no token consumption)")
@@ -370,6 +374,40 @@ func assertNoRefreshCookie(t *testing.T, rec *httptest.ResponseRecorder) {
 	for _, c := range rec.Result().Cookies() {
 		if c.Name == securecookie.Name {
 			t.Fatalf("a refresh_token cookie was set when it must not be (value %q)", c.Value)
+		}
+	}
+}
+
+func TestMagicLinkServerFailureIsLoggedWithoutLeakingDetails(t *testing.T) {
+	var logs strings.Builder
+	h := NewMagicLinkHandler(&stubMagicLinkService{err: errors.New("pgx: secret-db.internal failed")}, stubMailAvailable{}, slog.New(slog.NewTextHandler(&logs, nil)), []string{trustedOrigin})
+	rec := httptest.NewRecorder()
+	h.VerifyMagicLink(rec, verifiedPOST(t))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "secret-db") || !strings.Contains(logs.String(), "secret-db") {
+		t.Fatalf("body=%s logs=%s", rec.Body.String(), logs.String())
+	}
+	assertNoRefreshCookie(t, rec)
+}
+func TestTrustedOriginsCanonicalizeSchemeAndHostButRejectNonOrigins(t *testing.T) {
+	h := NewMagicLinkHandler(&stubMagicLinkService{}, stubMailAvailable{}, slog.Default(), []string{"HTTP://Admin.Example.test/"})
+	for _, tc := range []struct {
+		origin  string
+		trusted bool
+	}{
+		{"http://admin.example.test", true},
+		{"HTTP://ADMIN.EXAMPLE.TEST/", true},
+		{"https://admin.example.test", false},
+		{"http://admin.example.test.evil", false},
+		{"http://admin.example.test/private", false},
+		{"http://user@admin.example.test", false},
+		{"http://admin.example.test?x=1", false},
+		{"null", false}, {"", false},
+	} {
+		if got := h.isTrustedOrigin(tc.origin); got != tc.trusted {
+			t.Errorf("%q trusted=%v want=%v", tc.origin, got, tc.trusted)
 		}
 	}
 }

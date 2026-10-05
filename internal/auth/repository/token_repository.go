@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/whento/whento/internal/auth/models"
+	"github.com/whento/whento/internal/auth/sessionlock"
 )
 
 var (
@@ -56,17 +57,9 @@ func NewTokenRepository(pool *pgxpool.Pool) *TokenRepository {
 // generation under that lock, so this insert is refused instead of publishing
 // a session for the old security state.
 func (r *TokenRepository) Create(ctx context.Context, token *models.RefreshToken, securityGeneration int64) error {
-	if hold, ok := ctx.Value(createHoldKey{}).(rotationHold); ok && hold.entered != nil {
-		close(hold.entered)
-		select {
-		case <-hold.release:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
 	return r.withSessionLock(ctx, token.UserID, func(tx pgx.Tx) error {
 		var current int64
-		err := tx.QueryRow(ctx, `SELECT security_generation FROM users WHERE id = $1`, token.UserID).Scan(&current)
+		err := tx.QueryRow(ctx, `SELECT security_generation FROM users WHERE id = $1 FOR SHARE`, token.UserID).Scan(&current)
 		if err != nil {
 			return fmt.Errorf("failed to read security generation: %w", err)
 		}
@@ -89,15 +82,6 @@ func (r *TokenRepository) Create(ctx context.Context, token *models.RefreshToken
 		return nil
 	})
 }
-
-// HoldCreateBeforeLock pauses Create after the caller has captured the security
-// generation and before the session lock is taken. Tests use it to let a
-// password change or MFA enable return before the insert. Production never sets it.
-func HoldCreateBeforeLock(ctx context.Context, entered chan struct{}, release <-chan struct{}) context.Context {
-	return context.WithValue(ctx, createHoldKey{}, rotationHold{entered: entered, release: release})
-}
-
-type createHoldKey struct{}
 
 // GetByHash retrieves a refresh token by its hash
 func (r *TokenRepository) GetByHash(ctx context.Context, tokenHash string) (*models.RefreshToken, error) {
@@ -152,29 +136,6 @@ func (r *TokenRepository) Consume(ctx context.Context, tokenHash string) (bool, 
 	return result.RowsAffected() == 1, nil
 }
 
-// ConsumeOneTime atomically consumes a one-time nonce for a pending-MFA temp token.
-//
-// Redis is optional; when it is absent the cache is NoOpCache, whose exists/set are
-// neither observable nor atomic, so the old check-then-act replay guard failed open.
-// The database is never optional, so a row here is the durable claim: the single
-// INSERT ... ON CONFLICT DO NOTHING is the atomic consume, and exactly one caller —
-// sequential or concurrent — sees a row affected. Each digest is the SHA-256 of the
-// temp token's JTI, and expires_at tracks the signed token's own lifetime so a
-// consumed identifier cannot outlive the token that carried it. Expired rows are
-// cleared opportunistically so the table cannot grow without bound.
-func (r *TokenRepository) ConsumeOneTime(ctx context.Context, digest string, expiresAt time.Time) (bool, error) {
-	result, err := r.pool.Exec(ctx, `
-		INSERT INTO mfa_pending_nonce (digest, expires_at)
-		VALUES ($1, $2)
-		ON CONFLICT (digest) DO NOTHING`, digest, expiresAt)
-	if err != nil {
-		return false, fmt.Errorf("failed to consume one-time nonce: %w", err)
-	}
-	_, _ = r.pool.Exec(ctx, `DELETE FROM mfa_pending_nonce WHERE expires_at <= now()`)
-
-	return result.RowsAffected() == 1, nil
-}
-
 // CreatePendingMFASession finalizes a pending-MFA login atomically: it claims
 // the temp token's JTI digest as a one-time nonce, verifies the captured
 // security generation is still current, and inserts the refresh token — all in
@@ -204,8 +165,7 @@ func (r *TokenRepository) CreatePendingMFASession(
 	securityGeneration int64,
 ) (bool, error) {
 	// Opportunistically purge consumed nonces whose signed token has already
-	// expired. This used to run on the now-retired ConsumeOneTime path; without
-	// it the ledger would grow without bound, since a consumed digest can never
+	// expired. Without this the ledger would grow without bound, since a consumed digest can never
 	// be reused anyway. Best-effort: a failure here must not take the login down,
 	// which is why it runs on its own connection *before* the transaction rather
 	// than inside it — inside the transaction a statement failure would abort the
@@ -230,7 +190,7 @@ func (r *TokenRepository) CreatePendingMFASession(
 		// machinery uses: a password change or MFA enable that already returned
 		// has advanced the generation here.
 		var current int64
-		err = tx.QueryRow(ctx, `SELECT security_generation FROM users WHERE id = $1`, token.UserID).Scan(&current)
+		err = tx.QueryRow(ctx, `SELECT security_generation FROM users WHERE id = $1 FOR SHARE`, token.UserID).Scan(&current)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrUserNotFound
@@ -314,31 +274,6 @@ func (r *TokenRepository) DeleteExpired(ctx context.Context) (int64, error) {
 	return result.RowsAffected(), nil
 }
 
-type rotationHoldKey struct{}
-
-type rotationHold struct {
-	entered chan struct{}
-	release <-chan struct{}
-}
-
-// HoldRotationAfterRead pauses CommitRotation after the presented row is read and
-// before the successor is inserted. Tests use it to prove a concurrent user-wide
-// delete waits for the lock instead of committing against a snapshot that misses
-// the successor. Production never sets it.
-func HoldRotationAfterRead(ctx context.Context, entered chan struct{}, release <-chan struct{}) context.Context {
-	return context.WithValue(ctx, rotationHoldKey{}, rotationHold{entered: entered, release: release})
-}
-
-// sessionLockKey is a stable signed bigint for pg_advisory_xact_lock, derived from
-// the user id so refresh and logout for the same account queue on one lock.
-func sessionLockKey(userID uuid.UUID) int64 {
-	var key int64
-	for i := 0; i < 8; i++ {
-		key = (key << 8) | int64(userID[i])
-	}
-	return key
-}
-
 func (r *TokenRepository) withSessionLock(ctx context.Context, userID uuid.UUID, fn func(tx pgx.Tx) error) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -346,7 +281,7 @@ func (r *TokenRepository) withSessionLock(ctx context.Context, userID uuid.UUID,
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, sessionLockKey(userID)); err != nil {
+	if err := sessionlock.Acquire(ctx, tx, userID); err != nil {
 		return fmt.Errorf("session lock: %w", err)
 	}
 	err = fn(tx)
@@ -416,6 +351,15 @@ func (r *TokenRepository) CommitRotation(
 	grace time.Duration,
 ) error {
 	return r.withSessionLock(ctx, successor.UserID, func(tx pgx.Tx) error {
+		// Lock users before token rows, matching credential transitions and the
+		// successor INSERT's foreign-key lock order.
+		var userID uuid.UUID
+		if err := tx.QueryRow(ctx, `SELECT id FROM users WHERE id = $1 FOR SHARE`, successor.UserID).Scan(&userID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrTokenNotFound
+			}
+			return fmt.Errorf("lock rotation owner: %w", err)
+		}
 		var consumedAt *time.Time
 		var owner uuid.UUID
 		var familyID string
@@ -432,15 +376,6 @@ func (r *TokenRepository) CommitRotation(
 		if owner != successor.UserID {
 			return ErrTokenNotFound
 		}
-		if hold, ok := ctx.Value(rotationHoldKey{}).(rotationHold); ok && hold.entered != nil {
-			close(hold.entered)
-			select {
-			case <-hold.release:
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-
 		if consumedAt != nil && time.Since(*consumedAt) > grace {
 			if _, err := tx.Exec(ctx, `DELETE FROM refresh_tokens WHERE user_id = $1`, owner); err != nil {
 				return fmt.Errorf("failed to revoke sessions after reuse: %w", err)
@@ -449,11 +384,14 @@ func (r *TokenRepository) CommitRotation(
 		}
 
 		if consumedAt == nil {
-			if _, err := tx.Exec(ctx, `
-				UPDATE refresh_tokens
-				SET consumed_at = NOW()
-				WHERE token_hash = $1 AND consumed_at IS NULL`, presentedHash); err != nil {
+			result, err := tx.Exec(ctx, `
+ UPDATE refresh_tokens SET consumed_at = NOW()
+ WHERE token_hash = $1 AND consumed_at IS NULL`, presentedHash)
+			if err != nil {
 				return fmt.Errorf("failed to consume token: %w", err)
+			}
+			if result.RowsAffected() != 1 {
+				return ErrTokenNotFound
 			}
 		}
 		// A migrated row has no family. Stamp the successor's family onto the

@@ -6,8 +6,10 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -15,6 +17,7 @@ import (
 	"github.com/whento/pkg/httputil"
 	"github.com/whento/pkg/validator"
 	"github.com/whento/whento/internal/auth/models"
+	"github.com/whento/whento/internal/auth/service"
 	"github.com/whento/whento/internal/auth/sessioncookie"
 )
 
@@ -125,7 +128,7 @@ func (h *MagicLinkHandler) VerifyMagicLink(w http.ResponseWriter, r *http.Reques
 	// state machine for anything but an intentional, same-origin POST.
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
-		httputil.Error(w, http.StatusMethodNotAllowed, httputil.ErrCodeBadRequest, "Method not allowed. Submit the magic link confirmation as a POST.")
+		httputil.Error(w, http.StatusMethodNotAllowed, httputil.ErrCodeMethodNotAllowed, "Method not allowed. Submit the magic link confirmation as a POST.")
 		return
 	}
 
@@ -176,7 +179,12 @@ func (h *MagicLinkHandler) VerifyMagicLink(w http.ResponseWriter, r *http.Reques
 	// Verify magic link and either produce a session or a pending-MFA challenge.
 	authResponse, err := h.magicLinkService.VerifyMagicLink(ctx, req.Token)
 	if err != nil {
-		httputil.Error(w, http.StatusBadRequest, httputil.ErrCodeBadRequest, "Invalid or expired magic link")
+		if errors.Is(err, service.ErrInvalidToken) {
+			httputil.Error(w, http.StatusBadRequest, httputil.ErrCodeBadRequest, "Invalid or expired magic link")
+		} else {
+			h.logger.Error("Magic link verification failed", "error", err)
+			httputil.Error(w, http.StatusInternalServerError, httputil.ErrCodeInternal, "Unable to sign in. Please try again.")
+		}
 		return
 	}
 
@@ -217,7 +225,7 @@ func (h *MagicLinkHandler) VerifyMagicLinkRedirect(w http.ResponseWriter, r *htt
 	_ = chi.URLParam(r, "token")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Allow", http.MethodPost)
-	httputil.Error(w, http.StatusMethodNotAllowed, httputil.ErrCodeBadRequest,
+	httputil.Error(w, http.StatusMethodNotAllowed, httputil.ErrCodeMethodNotAllowed,
 		"Magic links no longer log you in from a link. Open the page and confirm the link there.")
 }
 
@@ -253,17 +261,22 @@ func (h *MagicLinkHandler) isTrustedOrigin(origin string) bool {
 // way when the handler is built, but a defensive exact-compare still strips a
 // stray trailing slash rather than trusting callers.
 func equalOrigin(a, b string) bool {
-	a = strings.TrimRight(normalizeOriginScheme(a), "/")
-	b = strings.TrimRight(normalizeOriginScheme(b), "/")
-	return a == b
+	a = strings.TrimRight(canonicalOrigin(a), "/")
+	b = strings.TrimRight(canonicalOrigin(b), "/")
+	return a != "" && a == b
 }
 
-func normalizeOriginScheme(origin string) string {
-	// Authority components are case-insensitive in the Origin header; lowercase
-	// everything after the scheme so "HTTPS://App.Example:443" compares equal to
-	// "https://app.example:443" while the path (never present) is not involved.
-	if idx := strings.Index(origin, "://"); idx >= 0 {
-		return strings.ToLower(origin[:idx+3]) + origin[idx+3:]
+func canonicalOrigin(origin string) string {
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.User != nil || parsed.Host == "" ||
+		(parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+		return ""
 	}
-	return strings.ToLower(origin)
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return ""
+	}
+	parsed.Host = strings.ToLower(parsed.Host)
+	parsed.Path = ""
+	return parsed.String()
 }
