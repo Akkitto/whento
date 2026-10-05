@@ -61,6 +61,8 @@ line per release rather than listed individually.
 - **Partial profile and calendar updates are field-preserving.** `PATCH
   /api/v1/auth/me` and the calendar settings PATCH write only the supplied
   fields, so two tabs saving unrelated fields no longer clobber each other.
+  Calendar date ordering is checked against the locked current row, retaining
+  the existing database constraint as a second guard.
 - **The last administrator is protected.** Demoting or deleting the last admin
   is refused transactionally, even under concurrent demotions or a deletion
   racing a registration.
@@ -87,6 +89,21 @@ line per release rather than listed individually.
   and a transient failure never burns or replays a proof. A password reset also
   advances the security generation and revokes every existing session in the
   same commit.
+- Password resets, password changes and MFA setup now share a namespaced
+  session lock with refresh issuance and rotation. Credential changes and
+  session revocation commit together; failed revocation rolls back the change.
+- Magic-link confirmation removes the proof from browser and router history,
+  including subsequent Back navigation; reloading the cleaned URL shows
+  instructions to reopen the email link. Missing MFA challenges fail closed.
+
+### Fixed
+
+- Registered the bcrypt byte-limit validator used by reset requests, restoring
+  the reset endpoint and rejecting passwords over 72 UTF-8 bytes without a panic.
+- Mailbox endpoints distinguish invalid proofs from logged server failures
+  without exposing database errors. Magic links remain retryable after transient
+  MFA lookup or session insertion failures. Trusted origins normalize both
+  scheme and hostname; legacy verification uses the correct 405 error code.
 
 ---
 

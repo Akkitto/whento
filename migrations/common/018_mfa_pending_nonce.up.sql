@@ -1,7 +1,3 @@
--- WhenTo - Collaborative event calendar for self-hosted environments
--- Copyright (C) 2025 WhenTo Contributors
--- SPDX-License-Identifier: BSL-1.1
-
 -- One-time consumption ledger for pending-MFA temp tokens.
 --
 -- A failed half-completed sign-in carries a temp token that must only finalize
@@ -15,11 +11,11 @@
 -- The digest is the SHA-256 of the token's JTI, and expires_at tracks the temp
 -- token's own expiry, so a consumed identifier cannot outlive the signed token
 -- it belonged to.
-CREATE TABLE mfa_pending_nonce (
+CREATE TABLE IF NOT EXISTS mfa_pending_nonce (
     digest     TEXT PRIMARY KEY,
     expires_at TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX mfa_pending_nonce_expires_at_idx
+CREATE INDEX IF NOT EXISTS mfa_pending_nonce_expires_at_idx
     ON mfa_pending_nonce (expires_at);

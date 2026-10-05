@@ -375,20 +375,6 @@ func run() error {
 	return nil
 }
 
-// startMetricsServer starts the Prometheus listener when the configuration asks
-// for it, and returns the function that stops it.
-//
-// The exposition never goes on the application router. It names every route,
-// counts every error, and reports pool saturation and Go build details: useful
-// to an operator, and free reconnaissance to anyone else. On its own listener,
-// exposure is whatever the operator publishes — a port mapping, a Kubernetes
-// Service — instead of depending on middleware ordering on a router that also
-// serves anonymous traffic. It is off unless METRICS_ENABLED says otherwise.
-//
-// It stays in this file on purpose: the "path" field it logs is the build-time
-// exposition path, and pkg/logger's log-field guard lifts that field name for
-// cmd/main.go by name. Moving this function moves it out from under the
-// exception and fails that test.
 // sweepExpiredRefreshTokens deletes refresh rows whose JWT has expired.
 // Rotation only cleans the user who just refreshed, so abandoned sessions
 // would otherwise remain forever. The interval is long enough that a sweep
@@ -422,6 +408,20 @@ func sweepExpiredRefreshTokens(ctx context.Context, tokens interface {
 	}
 }
 
+// startMetricsServer starts the Prometheus listener when the configuration asks
+// for it, and returns the function that stops it.
+//
+// The exposition never goes on the application router. It names every route,
+// counts every error, and reports pool saturation and Go build details: useful
+// to an operator, and free reconnaissance to anyone else. On its own listener,
+// exposure is whatever the operator publishes — a port mapping, a Kubernetes
+// Service — instead of depending on middleware ordering on a router that also
+// serves anonymous traffic. It is off unless METRICS_ENABLED says otherwise.
+//
+// It stays in this file on purpose: the "path" field it logs is the build-time
+// exposition path, and pkg/logger's log-field guard lifts that field name for
+// cmd/main.go by name. Moving this function moves it out from under the
+// exception and fails that test.
 func startMetricsServer(cfg *config.Config, log *slog.Logger) func() {
 	if !cfg.MetricsEnabled {
 		return func() {}
