@@ -99,25 +99,6 @@ func BuildAllowedHoursJSON(
 	return &jsonStr, nil
 }
 
-// BuildWeekdayTimesJSON serializes only the weekdays object, as stored under the
-// weekdays key of the allowed_hours JSONB column (e.g. {"1":{"start":"09:00","end":"18:00"}}).
-// It is not the whole allowed_hours document: sub-field patching writes only this
-// object through jsonb_set, leaving the holiday windows untouched.
-func BuildWeekdayTimesJSON(weekdayTimes map[string]TimeRange) (string, error) {
-	weekdaySlots := make(map[string]TimeSlot, len(weekdayTimes))
-	for day, timeRange := range weekdayTimes {
-		weekdaySlots[day] = TimeSlot{
-			Start: timeRange.MinTime,
-			End:   timeRange.MaxTime,
-		}
-	}
-	jsonBytes, err := json.Marshal(weekdaySlots)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal weekday times: %w", err)
-	}
-	return string(jsonBytes), nil
-}
-
 // ParseAllowedHoursJSON parses the JSONB string and extracts separate fields
 func ParseAllowedHoursJSON(allowedHoursJSON *string) (
 	weekdayTimes map[string]TimeRange,

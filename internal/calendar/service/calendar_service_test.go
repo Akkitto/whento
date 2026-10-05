@@ -139,6 +139,15 @@ func (m *mockCalendarRepo) Patch(_ context.Context, _ uuid.UUID, patch repositor
 		}
 		updated.AllowedHours = merged
 	}
+	if patch.ClearStartDate {
+		updated.StartDate = nil
+	}
+	if patch.ClearEndDate {
+		updated.EndDate = nil
+	}
+	if updated.StartDate != nil && updated.EndDate != nil && updated.EndDate.Before(*updated.StartDate) {
+		return nil, errors.New("end_date must be after start_date")
+	}
 	m.updated = &updated
 	return &updated, nil
 }

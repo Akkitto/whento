@@ -305,102 +305,6 @@ func (r *CalendarRepository) GetByPublicToken(ctx context.Context, token string)
 	return calendar, nil
 }
 
-// ListWithNotifyConfig returns every calendar that carries a notify_config.
-//
-// It exists for the reminder scheduler: reminders live inside the notify_config
-// JSON, so there is no relational column to filter on, and the scheduler needs
-// to see a calendar to learn whether its reminders are switched on. The JSON
-// filtering happens in Go, in the scheduler.
-func (r *CalendarRepository) ListWithNotifyConfig(ctx context.Context) ([]*models.Calendar, error) {
-	query := `
-		SELECT id, owner_id, name, description, public_token, ics_token, threshold, allowed_weekdays, min_duration_hours, timezone, holidays_policy, allow_holiday_eves, allowed_hours, notify_on_threshold, notify_config, lock_participants, allow_anonymous_participants, start_date, end_date, created_at, updated_at
-		FROM calendars
-		WHERE notify_config IS NOT NULL
-		ORDER BY id`
-
-	rows, err := r.Pool.Query(ctx, query)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list calendars with notify config: %w", err)
-	}
-	defer rows.Close()
-
-	var calendars []*models.Calendar
-	for rows.Next() {
-		calendar := &models.Calendar{}
-		err := rows.Scan(
-			&calendar.ID,
-			&calendar.OwnerID,
-			&calendar.Name,
-			&calendar.Description,
-			&calendar.PublicToken,
-			&calendar.ICSToken,
-			&calendar.Threshold,
-			&calendar.AllowedWeekdays,
-			&calendar.MinDurationHours,
-			&calendar.Timezone,
-			&calendar.HolidaysPolicy,
-			&calendar.AllowHolidayEves,
-			&calendar.AllowedHours,
-			&calendar.NotifyOnThreshold,
-			&calendar.NotifyConfig,
-			&calendar.LockParticipants,
-			&calendar.AllowAnonymousParticipants,
-			&calendar.StartDate,
-			&calendar.EndDate,
-			&calendar.CreatedAt,
-			&calendar.UpdatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan calendar: %w", err)
-		}
-		calendars = append(calendars, calendar)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating calendars: %w", err)
-	}
-
-	return calendars, nil
-}
-
-// Update updates a calendar
-func (r *CalendarRepository) Update(ctx context.Context, calendar *models.Calendar) error {
-	query := `
-		UPDATE calendars
-		SET name = $2, description = $3, threshold = $4, allowed_weekdays = $5, min_duration_hours = $6, timezone = $7, holidays_policy = $8, allow_holiday_eves = $9, allowed_hours = $10, notify_on_threshold = $11, lock_participants = $12, allow_anonymous_participants = $13, start_date = $14, end_date = $15, updated_at = NOW()
-		WHERE id = $1
-		RETURNING updated_at`
-
-	err := r.Pool.QueryRow(ctx, query,
-		calendar.ID,
-		calendar.Name,
-		calendar.Description,
-		calendar.Threshold,
-		calendar.AllowedWeekdays,
-		calendar.MinDurationHours,
-		calendar.Timezone,
-		calendar.HolidaysPolicy,
-		calendar.AllowHolidayEves,
-		calendar.AllowedHours,
-		calendar.NotifyOnThreshold,
-		calendar.LockParticipants,
-		calendar.AllowAnonymousParticipants,
-		calendar.StartDate,
-		calendar.EndDate,
-	).Scan(&calendar.UpdatedAt)
-
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrCalendarNotFound
-		}
-		return fmt.Errorf("failed to update calendar: %w", err)
-	}
-
-	return nil
-}
-
-// calendarColumns is the full projection used by the row reads and the patch
-// RETURNING clauses, so a patch result and a get agree column for column.
 const calendarColumns = `id, owner_id, name, description, public_token, ics_token, threshold, allowed_weekdays, min_duration_hours, timezone, holidays_policy, allow_holiday_eves, allowed_hours, notify_on_threshold, notify_config, lock_participants, allow_anonymous_participants, start_date, end_date, created_at, updated_at`
 
 // rowScanner is the minimal scan surface pgx.Row and pgx.Rows share, so one
@@ -529,7 +433,7 @@ func (r *CalendarRepository) Patch(ctx context.Context, id uuid.UUID, patch Cale
 
 	// No allowed-hours merge involved: a plain single UPDATE is already atomic, so
 	// keep the fast path. An empty patch still returns the current row.
-	if patch.AllowedHours == nil {
+	if patch.AllowedHours == nil && patch.StartDate == nil && patch.EndDate == nil && !patch.ClearStartDate && !patch.ClearEndDate {
 		if len(sets) == 0 {
 			calendar, err := scanCalendar(r.Pool.QueryRow(ctx, `SELECT `+calendarColumns+` FROM calendars WHERE id = $1`, id))
 			if err != nil {
@@ -563,19 +467,36 @@ func (r *CalendarRepository) Patch(ctx context.Context, id uuid.UUID, patch Cale
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var existing *string
-	if err := tx.QueryRow(ctx, `SELECT allowed_hours FROM calendars WHERE id = $1 FOR UPDATE`, id).Scan(&existing); err != nil {
+	var start, end *time.Time
+	if err := tx.QueryRow(ctx, `SELECT allowed_hours, start_date, end_date FROM calendars WHERE id = $1 FOR UPDATE`, id).Scan(&existing, &start, &end); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrCalendarNotFound
 		}
 		return nil, fmt.Errorf("read allowed_hours for patch: %w", err)
 	}
 
-	merged, err := MergeAllowedHours(existing, *patch.AllowedHours)
-	if err != nil {
-		return nil, err
+	// Check dates against the locked row. Equal dates allow one-day calendars.
+	if patch.ClearStartDate {
+		start = nil
+	} else if patch.StartDate != nil {
+		start = patch.StartDate
 	}
-	args = append(args, *merged)
-	sets = append(sets, fmt.Sprintf("allowed_hours = $%d", len(args)))
+	if patch.ClearEndDate {
+		end = nil
+	} else if patch.EndDate != nil {
+		end = patch.EndDate
+	}
+	if start != nil && end != nil && end.Before(*start) {
+		return nil, fmt.Errorf("end_date must be after start_date")
+	}
+	if patch.AllowedHours != nil {
+		merged, err := MergeAllowedHours(existing, *patch.AllowedHours)
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, *merged)
+		sets = append(sets, fmt.Sprintf("allowed_hours = $%d", len(args)))
+	}
 
 	query := `UPDATE calendars SET ` + strings.Join(sets, ", ") + `, updated_at = NOW() WHERE id = $1 RETURNING ` + calendarColumns
 	calendar, err := scanCalendar(tx.QueryRow(ctx, query, args...))

@@ -36,7 +36,6 @@ type CalendarRepository interface {
 	GetByID(ctx context.Context, id uuid.UUID) (*models.Calendar, error)
 	GetByOwnerID(ctx context.Context, ownerID uuid.UUID) ([]*models.Calendar, error)
 	GetByPublicToken(ctx context.Context, token string) (*models.Calendar, error)
-	Update(ctx context.Context, calendar *models.Calendar) error
 	Patch(ctx context.Context, id uuid.UUID, patch repository.CalendarPatch) (*models.Calendar, error)
 	UpdateThreshold(ctx context.Context, id uuid.UUID, threshold int) error
 	Delete(ctx context.Context, id uuid.UUID) error
@@ -567,10 +566,7 @@ func (s *CalendarService) UpdateCalendar(ctx context.Context, userID, userRole, 
 		}
 	}
 
-	// Validate that end_date is after start_date if both are set
-	if calendar.StartDate != nil && calendar.EndDate != nil && calendar.EndDate.Before(*calendar.StartDate) {
-		return nil, fmt.Errorf("end_date must be after start_date")
-	}
+	// Effective date ordering is validated by Patch against its locked row.
 
 	var hoursPatch *repository.AllowedHoursPatch
 	// Update allowed_hours only for the subpaths the request actually set. The

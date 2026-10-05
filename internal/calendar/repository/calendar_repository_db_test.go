@@ -303,7 +303,7 @@ func TestCalendarUpdateAndDelete(t *testing.T) {
 	calendar.Name = "Renamed"
 	calendar.Threshold = 5
 	calendar.AllowedWeekdays = []int{0, 6}
-	if err := repo.Update(ctx, calendar); err != nil {
+	if _, err := repo.Patch(ctx, calendar.ID, repository.CalendarPatch{Name: &calendar.Name, Threshold: &calendar.Threshold, AllowedWeekdays: calendar.AllowedWeekdays}); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
 
