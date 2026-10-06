@@ -29,6 +29,12 @@ def plan(number=3):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_postgres_probe_uses_disposable_service_role_and_database(self):
+        workflow = (pub.ROOT.parent / "workflows" / "pr163-publication.yml").read_text()
+        self.assertIn("POSTGRES_USER: test", workflow)
+        self.assertIn("POSTGRES_DB: postgres", workflow)
+        self.assertIn('--health-cmd "pg_isready -U test -d postgres"', workflow)
+
     def test_refresh_push_is_main_only_and_security_scans_are_retained(self):
         workflows = pub.ROOT.parent / "workflows"
 
