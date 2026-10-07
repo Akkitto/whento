@@ -29,6 +29,9 @@ services:
       - GOMODCACHE=/home/vscode/go/pkg/mod
       - GO_ENV=development
       - LOG_LEVEL=debug
+      # Secret-file paths are inside this service; mount the file separately.
+      - BOOTSTRAP_KEY=${BOOTSTRAP_KEY:-}
+      - BOOTSTRAP_KEY_FILE=${BOOTSTRAP_KEY_FILE:-}
       - DATABASE_URL=postgres://${DB_USER:-whento}:${DB_PASSWORD:-whento}@postgres:5432/${DB_NAME:-whento}?sslmode=disable
       - REDIS_URL=redis://redis:6379/0
     depends_on:

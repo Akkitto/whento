@@ -6,6 +6,7 @@ package config
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/url"
 	"os"
@@ -51,6 +52,38 @@ func clearEnv(t *testing.T) {
 		"SMTP_PASSWORD" + secretFileSuffix, "RATE_LIMIT_KEY_SALT" + secretFileSuffix,
 	} {
 		t.Setenv(key, "")
+	}
+}
+
+func TestHostBackendLoadsBootstrapKeyFromDotenv(t *testing.T) {
+	for _, fileBased := range []bool{false, true} {
+		t.Run(fmt.Sprintf("file=%t", fileBased), func(t *testing.T) {
+			clearEnv(t)
+			t.Chdir(t.TempDir())
+			// godotenv intentionally preserves exported values, including empty
+			// ones. Unset these so the fixture models an unexported host .env.
+			if err := os.Unsetenv("BOOTSTRAP_KEY"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Unsetenv("BOOTSTRAP_KEY_FILE"); err != nil {
+				t.Fatal(err)
+			}
+			const key = "host-test-only-boot-key-0123456789abcdef"
+			setting := "BOOTSTRAP_KEY=" + key + "\n"
+			if fileBased {
+				if err := os.WriteFile("bootstrap-key", []byte(key+"\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				setting = "BOOTSTRAP_KEY_FILE=bootstrap-key\n"
+			}
+			if err := os.WriteFile(".env", []byte(setting), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg := Load()
+			if cfg.BootstrapKey != key {
+				t.Fatal("host backend ignored bootstrap key in .env")
+			}
+		})
 	}
 }
 

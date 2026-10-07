@@ -130,6 +130,9 @@ jobs:
           done
           echo "✓ All Compose files are valid"
 
+      - name: Check bootstrap settings reach the backend
+        run: python3 scripts/check-bootstrap-compose.py
+
   # `make format-check` existed but was never called anywhere: Go formatting was enforced
   # only by the opt-in .githooks/pre-commit, which `git commit --no-verify` walks past.
   format-check:
@@ -258,8 +261,7 @@ jobs:
       # The committed password ceiling (maxLength: 72 on all four password
       # fields) must survive every regeneration; see swagger-contract-check in
       # the Makefile. This job has everything it needs — Go and the generated
-      # docs — so the contract gate runs here rather than nowhere: the previous
-      # yq-based one declared a tool this job never installed and was skipped.
+      # docs — so the standard-library Go contract check needs no extra parser.
       - name: Check password maxLength survives in Swagger docs
         run: make swagger-contract-check
 
