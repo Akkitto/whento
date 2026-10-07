@@ -12,8 +12,7 @@
 // TypeScript cannot catch it — lengths are not encoded in the types.
 //
 // Reading swagger.json with the standard library keeps this portable: it is a
-// small dependency-light replacement for the yq one-liner it used to be, which
-// declared an external tool the CI image never installed.
+// small dependency-light check requiring no external JSON/YAML parser.
 package main
 
 import (
@@ -23,7 +22,7 @@ import (
 	"path/filepath"
 )
 
-// limits mirrors SWAGGER_PASSWORD_LIMITS in the Makefile: "model:property".
+// limits is the contract's model:property table, used by the Makefile target.
 var limits = [][2]string{
 	{"models.BootstrapRequest", "password"},
 	{"models.ChangePasswordRequest", "new_password"},

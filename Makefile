@@ -408,11 +408,11 @@ swagger-clean:
 # the paired `max=72` annotation on the same field. A re-annotator that drops
 # the `max` tag would silently remove the documented ceiling, which is exactly
 # the drift this gate exists to prevent. It is a tiny Go program
-# (cmd/swagger-contract-check, which owns the model:property table) rather than
-# a yq one-liner, because CI's generate-swagger job installs Go but not yq.
+# (scripts/swagger-contract-check, which owns the model:property table) and
+# needs only Go's standard library, already available in generate-swagger.
 swagger-contract-check: swagger-generate
 	@echo "Checking password maxLength survives swagger regeneration..."
-	@go run ./cmd/swagger-contract-check .
+	@go run ./scripts/swagger-contract-check .
 	@echo "✓ All four password fields keep maxLength: 72"
 
 swagger: swagger-generate swagger-contract-check
