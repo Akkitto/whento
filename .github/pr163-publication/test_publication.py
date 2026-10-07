@@ -31,6 +31,13 @@ def plan(number=3):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_package_policy_is_trusted_and_precedes_clients_and_browser_dependencies(self):
+        workflow = (pub.ROOT.parent / "workflows" / "pr163-publication.yml").read_text()
+        self.assertLess(workflow.index("python3 .github/pr163-publication/prepare_apt.py"),
+                        workflow.index("      - name: Install test clients"))
+        self.assertIn("sudo --preserve-env=GITHUB_ACTIONS,GITHUB_REPOSITORY python3", workflow)
+        self.assertNotIn("sudo -E", workflow)
+
     def test_only_reviewed_helper_pushes_cancel_superseded_runs(self):
         workflow = (pub.ROOT.parent / "workflows" / "pr163-publication.yml").read_text()
         self.assertIn("  group: pr163-publication", workflow)

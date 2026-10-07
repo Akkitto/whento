@@ -100,6 +100,10 @@ run plans against the new main rather than publishing an untested or stale base.
 Another upstream change during verification likewise requires a fresh run.
 Tool setup skips package operations when the hosted tools already exist; needed
 downloads use bounded retries/timeouts and the setup step has a ten-minute limit.
+The isolated runner also replaces only the known stalled Azure Ubuntu mirror
+with Ubuntu's official HTTPS archive. APT retry/time limits cover subsequent
+Playwright dependency setup as well; signing keys and package verification stay
+unchanged. The setup refuses operator machines and upstream runners.
 
 Submission branches are created one at a time as
 prerequisites merge. No force-update of an existing branch is possible. Disable
