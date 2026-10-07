@@ -11,9 +11,10 @@ Related to #163; focused PR 7 of 8. Submit after dashboard ordering is merged.
 - Refresh only when due, including rearming callbacks that fire just before the due boundary.
 - Add an actual short-TTL backend CI project and mandatory family-scoped PostgreSQL row assertions; successful rotations may retain legitimate ancestors.
 - Isolate browser artifacts and unit-test message queues so concurrent/shuffled runs do not contaminate one another.
+- Keep cancelled HTTP/Redis callers local: browser navigation must not trip shared Redis health and block other users' session checks. Preserve fail-closed transport-outage handling.
 
 ## Verification
 
-The publication gate reruns frontend static checks, coverage and four shuffle seeds, both browser suites (including production-origin two-minute rotation), both Go module/build-variant race matrices and deployment builds. The successful verification run is linked below. The refreshed interceptor preserves PR #180's wrong-bootstrap-key regressions and the merged bootstrap behavior; credential rejection never refreshes or signs out a healthy session.
+The publication gate reruns frontend static checks, coverage and four shuffle seeds, both browser suites (including production-origin two-minute rotation), both Go module/build-variant race matrices and deployment builds. The successful verification run is linked below. The refreshed interceptor preserves PR #180's wrong-bootstrap-key regressions and the merged bootstrap behavior; credential rejection never refreshes or signs out a healthy session. Redis regressions exercise command/pipeline cancellation, caller versus transport deadlines, half-open health and a real healthy peer; rotation requires zero additional identity reads after startup.
 
 No schema migration beyond the prerequisite stack. Without Web Locks, fallback coordination cannot guarantee cross-tab HTTP Set-Cookie ordering; this limitation is retained explicitly. Logout may redirect a protected route; ordinary rotation/account replacement does not use reload loops.

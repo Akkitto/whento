@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import textwrap
 import unittest
 from unittest.mock import patch
 
@@ -30,6 +31,37 @@ def plan(number=3):
 
 
 class WorkflowTests(unittest.TestCase):
+    def install_script(self):
+        workflow = (pub.ROOT.parent / "workflows" / "pr163-publication.yml").read_text()
+        step = workflow.split("      - name: Install test clients\n", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("timeout-minutes: 10", step)
+        return textwrap.dedent(step.split("        run: |\n", 1)[1])
+
+    def test_preinstalled_clients_skip_all_privileged_package_operations(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            for tool in ("psql", "shellcheck", "rg"):
+                (Path(temporary) / tool).symlink_to("/bin/true")
+            (Path(temporary) / "sudo").symlink_to("/bin/false")
+            result = subprocess.run(["/bin/bash", "-c", self.install_script()],
+                                    env={"PATH": temporary}, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_needed_install_is_bounded_and_update_failure_stops_install(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            for tool in ("shellcheck", "rg"):
+                (Path(temporary) / tool).symlink_to("/bin/true")
+            sudo = Path(temporary) / "sudo"
+            sudo.write_text('#!/bin/bash\nprintf "%s\\n" "$*"\nexit 97\n')
+            sudo.chmod(0o700)
+            result = subprocess.run(["/bin/bash", "-c", self.install_script()],
+                                    env={"PATH": temporary}, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 97)
+            self.assertIn("Acquire::Retries=2", result.stdout)
+            self.assertIn("Acquire::http::Timeout=30", result.stdout)
+            self.assertIn("Acquire::https::Timeout=30", result.stdout)
+            self.assertIn("APT::Update::Error-Mode=any update", result.stdout)
+            self.assertNotIn(" install ", result.stdout)
+
     def test_candidate_gate_retains_bootstrap_compose_contract(self):
         self.assertIn("python3 scripts/check-bootstrap-compose.py", (pub.ROOT / "verify.sh").read_text())
 
@@ -37,7 +69,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(pub.source_ref(3), "codex/pr163-bootstrap-password")
         for number in range(4, 9):
             self.assertEqual(pub.source_ref(number),
-                             "codex/pr163-reviewed-20261007-" + pub.TOPICS[number - 1][0])
+                             ("codex/pr163-reviewed-20261007b-" if number >= 7
+                              else "codex/pr163-reviewed-20261007-") + pub.TOPICS[number - 1][0])
             self.assertNotIn("submit-", pub.source_ref(number))
         self.assertEqual(pub.source_base(4), pub.REVIEWED_BOOTSTRAP_FOLLOWUPS)
 

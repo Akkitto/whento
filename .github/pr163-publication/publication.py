@@ -33,8 +33,8 @@ TOPICS = [
     ("durable-reminders", "af307512a7cb4e6c92892c816b2f7c42a390dd58"),
     ("holiday-compatibility", "14a5c88b566fc19902302cd6cd8a415dc4841d35"),
     ("dashboard-ordering", "d0d087f4252f2573723e314613aaa341f73991ae"),
-    ("session-coordination", "f8ac2360e75473d44658b1a49ee949340f761b0c"),
-    ("safe-migrations", "9a6cedf9549ba397adf185d24cb6b15f186111ca"),
+    ("session-coordination", "bc76d390bc9d155c587c0a8928d27ed136f9abe0"),
+    ("safe-migrations", "7df7626e4a4d5ddcb2c6c5fd6715c47830d4d68c"),
 ]
 ROOT = Path(__file__).resolve().parent
 SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -170,7 +170,12 @@ def source_base(number):
 
 def source_ref(number):
     """Select the trusted frozen ref, never a ref supplied by a plan artifact."""
-    prefix = "codex/pr163-reviewed-20261007-" if number >= 4 else "codex/pr163-"
+    if number >= 7:
+        prefix = "codex/pr163-reviewed-20261007b-"
+    elif number >= 4:
+        prefix = "codex/pr163-reviewed-20261007-"
+    else:
+        prefix = "codex/pr163-"
     return prefix + TOPICS[number - 1][0]
 
 

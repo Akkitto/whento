@@ -100,7 +100,22 @@ jobs:
         with:
           node-version: '24'
       - name: Install test clients
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client shellcheck ripgrep
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          # Hosted Ubuntu normally already provides these tools. Avoid an
+          # unnecessary mirror refresh, and bound any genuinely needed install.
+          packages=()
+          command -v psql >/dev/null || packages+=(postgresql-client)
+          command -v shellcheck >/dev/null || packages+=(shellcheck)
+          command -v rg >/dev/null || packages+=(ripgrep)
+          if (( ${#packages[@]} )); then
+            apt_options=(-o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+            sudo apt-get "${apt_options[@]}" -o APT::Update::Error-Mode=any update
+            sudo env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" \
+              install --no-install-recommends -y "${packages[@]}"
+          fi
+          for tool in psql shellcheck rg; do command -v "$tool"; done
       - name: Verify candidate without any publication credential
         run: bash .github/pr163-publication/verify.sh "$RUNNER_TEMP/candidate"
       - name: Package the tested commit only

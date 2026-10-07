@@ -81,6 +81,12 @@ source refs and all previously published submission branches remain untouched.
 Topic 4's owning patch starts at that accepted upstream commit; topics 5–8 start
 at the preceding refreshed source. The session topic resolves the bootstrap
 interceptor overlap while retaining the merged wrong-key regression tests.
+Full browser verification also exposed upstream's shared Redis breaker treating
+caller cancellation as an outage. The reviewed session fix isolates caller errors
+while retaining fail-closed transport handling, and the rotation assertion now
+requires zero additional identity reads during rotation itself. Topics 7–8 use
+`codex/pr163-reviewed-20261007b-<topic>` snapshots; the earlier reviewed snapshots
+are retained too.
 These reviewed source refs are snapshots, **not branches to open PRs for**.
 Only `codex/pr163-submit-<topic>` branches get the ready-to-open links.
 
