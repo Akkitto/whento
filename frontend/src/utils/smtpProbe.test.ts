@@ -57,6 +57,28 @@ describe('useSmtpProbe', () => {
     await expect(probe()).resolves.toBe('error');
     expect(state.value).toBe('error');
   });
+
+  it.each(['unavailable', 'error'] as const)(
+    'ignores an older %s response after a newer successful probe',
+    async olderOutcome => {
+      let resolveOld!: (value: { available: boolean }) => void;
+      let rejectOld!: (error: Error) => void;
+      const oldRequest = new Promise<{ available: boolean }>((resolve, reject) => {
+        resolveOld = resolve;
+        rejectOld = reject;
+      });
+      vi.mocked(authApi.checkMagicLinkAvailable)
+        .mockReturnValueOnce(oldRequest)
+        .mockResolvedValueOnce({ available: true });
+      const { state, probe } = useSmtpProbe();
+      const first = probe();
+      await probe();
+      if (olderOutcome === 'error') rejectOld(new Error('stale request failed'));
+      else resolveOld({ available: false });
+      await first;
+      expect(state.value).toBe('available');
+    }
+  );
 });
 
 describe('applySmtpProbeToConfig', () => {

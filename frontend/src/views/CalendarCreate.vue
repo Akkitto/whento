@@ -307,7 +307,7 @@ const form = reactive({
 // Notification config state
 const notifyConfig = ref<NotifyConfig>(getDefaultNotifyConfig());
 // Email notification options depend on the instance actually having SMTP
-// configured; default to hidden until the backend confirms otherwise.
+// configured; an unfinished/failed probe preserves the owner's saved intent.
 const { state: smtpProbe, probe: probeSmtp } = useSmtpProbe();
 
 const participants = ref<string[]>([]);

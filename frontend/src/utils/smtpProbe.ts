@@ -31,14 +31,20 @@ export type SmtpProbeState = 'unknown' | 'available' | 'unavailable' | 'error';
  */
 export function useSmtpProbe() {
   const state = ref<SmtpProbeState>('unknown');
+  let generation = 0;
 
   const probe = async (): Promise<SmtpProbeState> => {
+    const request = ++generation;
     state.value = 'unknown';
     try {
       const result = await authApi.checkMagicLinkAvailable();
-      state.value = result.available ? 'available' : 'unavailable';
+      if (request === generation) {
+        state.value = result.available ? 'available' : 'unavailable';
+      }
     } catch {
-      state.value = 'error';
+      if (request === generation) {
+        state.value = 'error';
+      }
     }
     return state.value;
   };

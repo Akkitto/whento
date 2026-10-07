@@ -78,7 +78,7 @@
               </label>
             </div>
             <div
-              v-else-if="smtpProbe === 'unavailable'"
+              v-if="smtpProbe === 'unavailable'"
               class="rounded-md bg-gray-50 p-3 text-sm text-gray-600 dark:bg-gray-800 dark:text-gray-400"
             >
               {{ t('notifications.smtpNotConfigured') }}
@@ -289,10 +289,11 @@ const { t } = useI18n();
 const localConfig = ref<NotifyConfig>(getDefaultNotifyConfig());
 const saving = ref(false);
 
-// The email channel is offered whenever SMTP may exist; only a confirmed
-// 'unavailable' hides it (and makes persistence force it off). While the probe is
-// in flight or failed, the checkbox keeps reflecting the saved value.
-const emailOptionVisible = computed(() => props.smtpProbe !== 'unavailable');
+// Keep saved consent visible so it can be explicitly revoked during an outage.
+// A confirmed outage hides new opt-ins, but never rewrites the saved preference.
+const emailOptionVisible = computed(
+  () => props.smtpProbe !== 'unavailable' || localConfig.value.channels.email.enabled
+);
 
 // Initialize local config from props - only on mount and when prop changes externally
 let isInternalUpdate = false;
