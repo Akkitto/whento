@@ -91,6 +91,13 @@ while retaining fail-closed transport handling, and the rotation assertion now
 requires zero additional identity reads during rotation itself. Topics 7–8 use
 `codex/pr163-reviewed-20261007b-<topic>` snapshots; the earlier reviewed snapshots
 are retained too.
+PR185's later review removed the no-op SMTP config adapter. The topic-7 snapshot
+also carried an obsolete comment-only correction beside that adapter call, which
+conflicted with PR185's replacement during replay. Topics 7–8 now use separate
+`codex/pr163-reviewed-20261007c-<topic>` snapshots: that unrelated topic-7 correction
+is left to PR185, and topic 8 is anchored on the revised topic-7 source. The owning
+account-coordination and migration deltas are otherwise unchanged. All older
+snapshots remain available; the workflow still refuses to overwrite submissions.
 These reviewed source refs are snapshots, **not branches to open PRs for**.
 Only `codex/pr163-submit-<topic>` branches get the ready-to-open links.
 

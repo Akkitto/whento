@@ -82,7 +82,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(pub.source_ref(3), "codex/pr163-bootstrap-password")
         for number in range(4, 9):
             self.assertEqual(pub.source_ref(number),
-                             ("codex/pr163-reviewed-20261007b-" if number >= 7
+                             ("codex/pr163-reviewed-20261007c-" if number >= 7
                               else "codex/pr163-reviewed-20261007-") + pub.TOPICS[number - 1][0])
             self.assertNotIn("submit-", pub.source_ref(number))
         self.assertEqual(pub.source_base(4), pub.REVIEWED_BOOTSTRAP_FOLLOWUPS)

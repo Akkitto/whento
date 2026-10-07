@@ -40,6 +40,9 @@ if rg -q 'validate-compose:' .github/workflows/ci.yml; then
   done
   # PR 180's deployment contract must remain true in every later topic.
   python3 scripts/check-bootstrap-compose.py
+  if test -f scripts/check-reminder-compose.py; then
+    python3 scripts/check-reminder-compose.py
+  fi
 fi
 (
   cd frontend
