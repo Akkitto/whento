@@ -65,6 +65,35 @@ type fakeReminderJobStore struct {
 
 	enqueueErr error
 	claimErr   error
+	missed     []models.ReminderJob
+	cleanups   int
+}
+
+func (f *fakeReminderJobStore) RecordMissed(_ context.Context, job *models.ReminderJob) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, old := range f.missed {
+		if old.CalendarID == job.CalendarID && old.EventDate.Equal(job.EventDate) && old.Channel == job.Channel && old.RecipientType == job.RecipientType {
+			return false, nil
+		}
+	}
+	f.missed = append(f.missed, *job)
+	return true, nil
+}
+
+func (f *fakeReminderJobStore) Cleanup(context.Context, time.Time, int) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cleanups++
+	return 0, nil
+}
+
+func (f *fakeNotificationLog) WasReminderSent(ctx context.Context, calendarID uuid.UUID, date time.Time, recipientID uuid.UUID, channel string) (bool, error) {
+	return f.WasNotificationSentRecently(ctx, calendarID, date, reminderEventType, recipientID, channel)
+}
+
+func (*fakeNotificationLog) CleanupReminderLogs(context.Context, time.Time, int) (int64, error) {
+	return 0, nil
 }
 
 func (f *fakeReminderJobStore) Enqueue(_ context.Context, job *models.ReminderJob) error {
@@ -228,7 +257,10 @@ func newReminderFixture(t *testing.T, config models.NotifyConfig) *reminderFixtu
 
 	s := NewReminderScheduler(
 		calendars, slots, people, users, log, mailer, external, jobs,
-		"https://whento.test", "test-instance", NewReminderTunables(), quietLogger(),
+		"https://whento.test", "test-instance", ReminderTunables{
+			HoursBefore: 24 * time.Hour, Interval: 5 * time.Minute, CatchUpWindow: 15 * time.Minute,
+			MaxAttempts: 5, RetryBackoff: time.Minute,
+		}, quietLogger(),
 	)
 	s.now = fixedReminderNow
 
@@ -350,7 +382,7 @@ func TestReminderWindowOpen(t *testing.T) {
 
 // TestReminderBackoffGrowsExponentiallyAndCaps pins the retry schedule.
 func TestReminderBackoffGrowsExponentiallyAndCaps(t *testing.T) {
-	s := &ReminderScheduler{backoffBase: reminderBackoffBase, backoffMax: reminderBackoffMax}
+	s := &ReminderScheduler{backoffBase: time.Minute, backoffMax: reminderBackoffMax}
 
 	if got := s.backoff(1); got != 1*time.Minute {
 		t.Errorf("backoff(1) = %v, want 1m", got)
@@ -487,7 +519,7 @@ func TestReminderRetriesThenFailsPermanently(t *testing.T) {
 	if rec.attempt != 1 {
 		t.Errorf("attempt = %d, want 1", rec.attempt)
 	}
-	wantNext := fixedReminderNow().Add(reminderBackoffBase)
+	wantNext := fixedReminderNow().Add(time.Minute)
 	if !rec.next.Equal(wantNext) {
 		t.Errorf("next_attempt_at = %v, want %v", rec.next, wantNext)
 	}

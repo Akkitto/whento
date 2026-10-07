@@ -15,7 +15,7 @@ import (
 	"github.com/whento/whento/internal/testutil/dbtest"
 )
 
-func TestListForReminderScanPreservesCalendarRowsAndExcludesNullConfig(t *testing.T) {
+func TestListForReminderScanPreservesRowsAndFiltersEnabledFlags(t *testing.T) {
 	pool := dbtest.Pool(t)
 	ctx := dbtest.Context(t)
 	owner := newOwner(t, pool)
@@ -25,7 +25,8 @@ func TestListForReminderScanPreservesCalendarRowsAndExcludesNullConfig(t *testin
 		t.Fatal(err)
 	}
 	want := make(map[uuid.UUID]*models.Calendar)
-	for _, config := range []string{`{}`, `{"enabled":true,"reminders":{"enabled":true}}`} {
+	excluded := map[uuid.UUID]bool{withoutConfig.ID: true}
+	for _, config := range []string{`{}`, `{"enabled":false,"reminders":{"enabled":true}}`, `{"enabled":true,"reminders":{"enabled":false}}`, `{"enabled":"true","reminders":{"enabled":true}}`, `{"enabled":true,"reminders":{"enabled":true}}`} {
 		calendar := newCalendar(owner.ID, func(c *models.Calendar) {
 			c.NotifyConfig = strPtr(config)
 			c.Description = "reminder scan fixture"
@@ -38,7 +39,11 @@ func TestListForReminderScanPreservesCalendarRowsAndExcludesNullConfig(t *testin
 		if err != nil {
 			t.Fatal(err)
 		}
-		want[calendar.ID] = stored
+		if config == `{"enabled":true,"reminders":{"enabled":true}}` {
+			want[calendar.ID] = stored
+		} else {
+			excluded[calendar.ID] = true
+		}
 	}
 	rows, err := repo.ListForReminderScan(ctx)
 	if err != nil {
@@ -51,8 +56,8 @@ func TestListForReminderScanPreservesCalendarRowsAndExcludesNullConfig(t *testin
 			t.Fatalf("scan is not ordered by calendar ID: %s >= %s", previous, id)
 		}
 		previous = id
-		if got.ID == withoutConfig.ID {
-			t.Fatal("calendar with NULL notification config was included")
+		if excluded[got.ID] {
+			t.Fatal("calendar without both enabled boolean flags was included")
 		}
 		if stored, ok := want[got.ID]; ok {
 			if !reflect.DeepEqual(got, stored) {

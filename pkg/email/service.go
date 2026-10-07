@@ -148,7 +148,7 @@ func (s *Service) SendContext(ctx context.Context, email Email) error {
 
 	if err := s.sendWithTLS(ctx, addr, auth, s.fromAddress, email.To, message); err != nil {
 		s.logger.Error("Failed to send email",
-			slog.String("error", err.Error()),
+			slog.String("error_category", "smtp_delivery_failed"),
 			slog.String("recipient_ref", recipients),
 			slog.Int("recipient_count", len(email.To)),
 		)
@@ -171,6 +171,9 @@ func (s *Service) sendWithTLS(ctx context.Context, addr string, auth smtp.Auth, 
 		return err
 	}
 	defer func() { _ = conn.Close() }()
+	// A canceled worker must not wait out the socket deadline during shutdown.
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
 
 	// One deadline for the whole conversation. net/smtp has no context of its own, so
 	// this is what keeps a silent server from parking the goroutine on a read.

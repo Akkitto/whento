@@ -187,7 +187,7 @@ func (r *ReminderJobRepository) RenewLease(
 	leaseUntil := now.Add(ttl)
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE reminder_jobs
-		SET lease_until = $4, locked_at = $3, updated_at = now()
+		SET lease_until = GREATEST(lease_until, $4), locked_at = $3, updated_at = now()
 		WHERE id = $1 AND status = 'pending' AND claim_token = $2 AND lease_until >= $3`,
 		id, token, now, leaseUntil)
 	if err != nil {
@@ -207,7 +207,7 @@ func (r *ReminderJobRepository) MarkSent(ctx context.Context, id, token uuid.UUI
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE reminder_jobs
 		SET status = 'sent', sent_at = now(), claim_token = NULL, lease_until = NULL,
-		    locked_by = NULL, locked_at = NULL, canceled_at = NULL, updated_at = now()
+		    locked_by = NULL, locked_at = NULL, canceled_at = NULL, last_error = NULL, updated_at = now()
 		WHERE id = $1 AND status = 'pending' AND claim_token = $2 AND lease_until >= now()`,
 		id, token)
 	if err != nil {
@@ -217,6 +217,41 @@ func (r *ReminderJobRepository) MarkSent(ctx context.Context, id, token uuid.UUI
 		return models.ErrClaimLost
 	}
 	return nil
+}
+
+// RecordMissed creates a canceled audit row once, without changing an existing
+// delivery or claim. Enqueue may rearm it if an explicit schedule change brings
+// the event back into the catch-up window.
+func (r *ReminderJobRepository) RecordMissed(ctx context.Context, job *models.ReminderJob) (bool, error) {
+	tag, err := r.pool.Exec(ctx, `
+		INSERT INTO reminder_jobs
+			(calendar_id, event_date, recipient_type, channel, scheduled_at, max_attempts,
+			 next_attempt_at, status, canceled_at, last_error)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, 'canceled', now(), 'catch_up_window_missed')
+		ON CONFLICT (calendar_id, event_date, recipient_type, channel) DO NOTHING`,
+		job.CalendarID, job.EventDate, job.RecipientType, job.Channel, job.ScheduledAt,
+		job.MaxAttempts, job.NextAttemptAt)
+	if err != nil {
+		return false, fmt.Errorf("failed to record missed reminder: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// Cleanup bounds queue retention without removing future-event tombstones or
+// live claims. Abandoned pending jobs for long-past events are also expired.
+func (r *ReminderJobRepository) Cleanup(ctx context.Context, before time.Time, limit int) (int64, error) {
+	tag, err := r.pool.Exec(ctx, `
+		DELETE FROM reminder_jobs WHERE id IN (
+			SELECT id FROM reminder_jobs
+			WHERE event_date < ($1::timestamptz AT TIME ZONE 'UTC')::date AND updated_at < $1::timestamptz
+			  AND (lease_until IS NULL OR lease_until < now())
+			ORDER BY event_date, id LIMIT $2
+			FOR UPDATE SKIP LOCKED
+		)`, before.UTC(), limit)
+	if err != nil {
+		return 0, fmt.Errorf("failed to clean reminder jobs: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // MarkFailed records a delivery failure and schedules the next attempt, or

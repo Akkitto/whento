@@ -5,8 +5,10 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -77,8 +79,13 @@ func TestReminderFanoutRenewsBeforeEveryBoundedSend(t *testing.T) {
 		t.Fatalf("context sends=%d lease renewals=%d, want one of each per recipient", len(mailer.deadlines), len(f.jobs.renewed))
 	}
 	for _, deadline := range mailer.deadlines {
-		if deadline <= 0 || deadline >= preSendLease {
+		if deadline <= 0 || deadline >= f.scheduler.lockTTL {
 			t.Fatalf("send deadline %s does not fit inside lease", deadline)
+		}
+	}
+	for _, renewal := range f.jobs.renewed {
+		if renewal.ttl != f.scheduler.lockTTL {
+			t.Fatalf("renewal shortened the claim lease to %s", renewal.ttl)
 		}
 	}
 	if len(f.jobs.sent) != 1 {
@@ -165,7 +172,7 @@ func TestReminderFailureUsesPersistedAttemptBudget(t *testing.T) {
 func TestReminderEmailEscapesCalendarNameAndURL(t *testing.T) {
 	f := newReminderFixture(t, reminderConfig())
 	f.calendar.Name = `<img src=x onerror=alert(1)>`
-	body := f.scheduler.buildReminderEmail(f.calendar, fixedReminderNow(), `https://whento.test/" onmouseover="evil`, "en")
+	body := f.scheduler.buildReminderEmail(f.calendar, fixedReminderNow(), `https://whento.test/" onmouseover="evil`, "en", true)
 	if strings.Contains(body, `<img`) || strings.Contains(body, `href="https://whento.test/" onmouseover=`) {
 		t.Fatal("reminder HTML contains unescaped data")
 	}
@@ -222,5 +229,131 @@ func TestReminderChatLedgerFailureIsRetried(t *testing.T) {
 	f.scheduler.deliverOne(t.Context(), job)
 	if len(f.external.calls) != 1 || len(f.jobs.failed) != 1 || len(f.jobs.sent) != 0 {
 		t.Fatal("chat delivery ignored a failed ledger write")
+	}
+}
+
+func TestReminderProviderSecretsDoNotReachLogsOrQueueErrors(t *testing.T) {
+	for _, channel := range []string{"email", "discord", "slack", "telegram"} {
+		t.Run(channel, func(t *testing.T) {
+			f := newReminderFixture(t, reminderConfig())
+			const secret = "sensitive-provider-token-or-address"
+			cause := errors.New("Post https://provider.test/" + secret + ": transport failed")
+			f.mailer.err, f.external.err = cause, cause
+			var output bytes.Buffer
+			f.scheduler.logger = slog.New(slog.NewJSONHandler(&output, nil))
+			job := enqueueDueJob()
+			job.CalendarID, job.Channel = f.calendar.ID, channel
+			f.scheduler.deliverOne(t.Context(), job)
+			if len(f.jobs.failed) != 1 {
+				t.Fatal("provider failure did not schedule a retry")
+			}
+			if strings.Contains(output.String(), secret) || strings.Contains(f.jobs.failed[0].reason, secret) {
+				t.Fatal("provider credential leaked into reminder log/last_error")
+			}
+			if err := f.scheduler.sendJob(t.Context(), f.calendar, func() *models.NotifyConfig { cfg := reminderConfig(); return &cfg }(), job); !errors.Is(err, cause) {
+				t.Fatalf("provider error identity lost: %v", err)
+			}
+		})
+	}
+}
+
+func TestReminderMissedWindowIsRecordedAndWarnedOnlyOnce(t *testing.T) {
+	f := newReminderFixture(t, reminderConfig())
+	f.scheduler.catchUp = time.Minute
+	f.scheduler.interval = time.Minute
+	var output bytes.Buffer
+	f.scheduler.logger = slog.New(slog.NewJSONHandler(&output, nil))
+	f.scheduler.enqueueDue(t.Context())
+	f.scheduler.enqueueDue(t.Context())
+	if len(f.jobs.enqueued) != 0 || len(f.jobs.missed) != 5 {
+		t.Fatalf("missed=%d enqueued=%d", len(f.jobs.missed), len(f.jobs.enqueued))
+	}
+	if warnings := strings.Count(output.String(), "Reminder catch-up window missed"); warnings != 5 {
+		t.Fatalf("missed warnings=%d, want one per delivery", warnings)
+	}
+	if strings.Contains(output.String(), f.calendar.PublicToken) || strings.Contains(output.String(), *f.participant.Email) {
+		t.Fatal("missed warning leaked calendar credential or recipient")
+	}
+}
+
+func TestReminderCleanupRunsDailyAfterDrainingBacklog(t *testing.T) {
+	f := newReminderFixture(t, reminderConfig())
+	f.scheduler.runOnce(t.Context())
+	f.scheduler.runOnce(t.Context())
+	if f.jobs.cleanups != 1 {
+		t.Fatalf("cleanups=%d, want 1", f.jobs.cleanups)
+	}
+	f.scheduler.now = func() time.Time { return fixedReminderNow().Add(24 * time.Hour) }
+	f.scheduler.runOnce(t.Context())
+	if f.jobs.cleanups != 2 {
+		t.Fatalf("daily cleanup did not run: %d", f.jobs.cleanups)
+	}
+}
+
+func TestReminderParticipantCancelLinkIsLocalizedAndOwnerHasNoCancel(t *testing.T) {
+	f := newReminderFixture(t, reminderConfig())
+	for _, locale := range []string{"en", "fr"} {
+		url := "https://whento.test/c/token/p/participant"
+		body := f.scheduler.buildReminderEmail(f.calendar, fixedReminderNow(), url, locale, true)
+		label := "Cancel my participation"
+		if locale == "fr" {
+			label = "Annuler ma participation"
+		}
+		if !strings.Contains(body, url+"?cancel=2026-04-01") || !strings.Contains(body, label) {
+			t.Fatalf("missing %s cancellation link: %s", locale, body)
+		}
+		owner := f.scheduler.buildReminderEmail(f.calendar, fixedReminderNow(), url, locale, false)
+		if strings.Contains(owner, "?cancel=") {
+			t.Fatal("owner was offered participant cancellation")
+		}
+	}
+}
+
+type acceptedDuringShutdownMailer struct {
+	*fakeMailer
+	cancel context.CancelFunc
+}
+
+func (m *acceptedDuringShutdownMailer) SendContext(ctx context.Context, msg email.Email) error {
+	m.cancel() // The provider accepted just as the process began shutting down.
+	return m.Send(msg)
+}
+
+type contextCheckingCompletionLog struct{ *fakeNotificationLog }
+
+func (l *contextCheckingCompletionLog) LogNotification(ctx context.Context, calendarID uuid.UUID, date time.Time, event, recipientType string, recipientID uuid.UUID, channel string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		return errors.New("completion write has no deadline")
+	}
+	return l.fakeNotificationLog.LogNotification(ctx, calendarID, date, event, recipientType, recipientID, channel)
+}
+
+type contextCheckingCompletionJobs struct{ *fakeReminderJobStore }
+
+func (s *contextCheckingCompletionJobs) MarkSent(ctx context.Context, id, token uuid.UUID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, ok := ctx.Deadline(); !ok {
+		return errors.New("MarkSent has no deadline")
+	}
+	return s.fakeReminderJobStore.MarkSent(ctx, id, token)
+}
+
+func TestReminderAcceptedSendIsRecordedDespiteConcurrentShutdown(t *testing.T) {
+	f := newReminderFixture(t, reminderConfig())
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	f.scheduler.emailService = &acceptedDuringShutdownMailer{fakeMailer: f.mailer, cancel: cancel}
+	f.scheduler.notificationLog = &contextCheckingCompletionLog{fakeNotificationLog: f.log}
+	f.scheduler.jobs = &contextCheckingCompletionJobs{fakeReminderJobStore: f.jobs}
+	job := enqueueDueJob()
+	job.CalendarID = f.calendar.ID
+	f.scheduler.deliverOne(ctx, job)
+	if len(f.jobs.sent) != 1 || len(f.log.logged) != 1 {
+		t.Fatal("accepted send lost its completion at shutdown")
 	}
 }
