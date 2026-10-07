@@ -285,3 +285,43 @@ func TestReminderSMTPDisabledCalendarNeitherEnqueuesNorSends(t *testing.T) {
 		t.Fatal("disabled reminder produced mail")
 	}
 }
+
+func TestReminderSMTPConfiguredRejectionExhaustsStoredBudget(t *testing.T) {
+	f, pool, sink, job := smtpReminderFixture(t)
+	ctx := dbtest.Context(t)
+	job.MaxAttempts = 3 // A changed process default must not rewrite this job's budget.
+	sink.reject = *f.participant.Email
+	if err := f.scheduler.jobs.Enqueue(ctx, &job); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 1; attempt <= job.MaxAttempts; attempt++ {
+		if worked, err := f.scheduler.deliverDue(ctx); err != nil || !worked {
+			t.Fatalf("attempt %d: %v, %v", attempt, worked, err)
+		}
+		if _, err := pool.Exec(ctx, `UPDATE reminder_jobs SET next_attempt_at = now() WHERE calendar_id = $1 AND status = 'pending'`, job.CalendarID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var status, reason string
+	var attempts int
+	if err := pool.QueryRow(ctx, `SELECT status, attempt, last_error FROM reminder_jobs WHERE calendar_id = $1`, job.CalendarID).Scan(&status, &attempts, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" || attempts != 3 || reason != "email_delivery_failed" {
+		t.Fatalf("exhausted state: %s, %d, %s", status, attempts, reason)
+	}
+	sink.mu.Lock()
+	sink.reject = ""
+	sink.mu.Unlock()
+	if err := f.scheduler.jobs.Enqueue(ctx, &job); err != nil {
+		t.Fatal(err)
+	}
+	if worked, err := f.scheduler.deliverDue(ctx); err != nil || worked {
+		t.Fatalf("exhausted job restarted after SMTP recovery: %v, %v", worked, err)
+	}
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.bodies) != 0 {
+		t.Fatal("permanently failed job sent after recovery")
+	}
+}

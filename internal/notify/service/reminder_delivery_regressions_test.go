@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -103,6 +104,20 @@ func TestReminderFanoutStopsImmediatelyWhenClaimIsLost(t *testing.T) {
 	}
 	if len(f.jobs.sent) != 0 || len(f.jobs.failed) != 0 || len(f.jobs.canceledEvent) != 0 {
 		t.Fatal("lost worker mutated the queue or canceled another worker's event")
+	}
+}
+
+func TestReminderFanoutStopsWhenEventStartsBetweenRecipients(t *testing.T) {
+	f, job := participantFanout(t)
+	now := job.EventDate.Add(-15 * time.Second)
+	f.scheduler.now = func() time.Time { return now }
+	f.scheduler.emailService = &leaseCheckingMailer{fakeMailer: f.mailer, now: &now}
+	f.scheduler.deliverOne(t.Context(), job)
+	if len(f.mailer.messages()) != 1 || len(f.jobs.canceledClaim) != 1 {
+		t.Fatal("fanout continued sending after the calendar-local event began")
+	}
+	if len(f.jobs.failed) != 0 || len(f.jobs.sent) != 0 {
+		t.Fatal("elapsed event was retried or marked fully delivered")
 	}
 }
 
@@ -252,6 +267,38 @@ func TestReminderProviderSecretsDoNotReachLogsOrQueueErrors(t *testing.T) {
 			}
 			if err := f.scheduler.sendJob(t.Context(), f.calendar, func() *models.NotifyConfig { cfg := reminderConfig(); return &cfg }(), job); !errors.Is(err, cause) {
 				t.Fatalf("provider error identity lost: %v", err)
+			}
+		})
+	}
+}
+
+type reminderFailingTransport struct{}
+
+func (reminderFailingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("simulated DNS failure")
+}
+
+func TestReminderConcreteHTTPProviderErrorsDoNotLeakTokens(t *testing.T) {
+	for _, channel := range []string{"discord", "slack", "telegram"} {
+		t.Run(channel, func(t *testing.T) {
+			cfg := reminderConfig()
+			const secret = "PRIVATE_PROVIDER_CREDENTIAL"
+			cfg.Channels.Discord.WebhookURL = "https://discord.test/" + secret
+			cfg.Channels.Slack.WebhookURL = "https://slack.test/" + secret
+			cfg.Channels.Telegram.BotToken = "123456:" + secret
+			f := newReminderFixture(t, cfg)
+			var output bytes.Buffer
+			logger := slog.New(slog.NewJSONHandler(&output, nil))
+			f.scheduler.logger = logger
+			f.scheduler.externalNotifier = &ExternalNotifier{httpClient: &http.Client{Transport: reminderFailingTransport{}}, logger: logger}
+			job := enqueueDueJob()
+			job.CalendarID, job.Channel = f.calendar.ID, channel
+			f.scheduler.deliverOne(t.Context(), job)
+			if len(f.jobs.failed) != 1 || f.jobs.failed[0].reason != channel+"_delivery_failed" {
+				t.Fatal("HTTP provider failure did not record a safe category")
+			}
+			if strings.Contains(output.String(), secret) {
+				t.Fatal("HTTP url.Error leaked provider URL/token")
 			}
 		})
 	}

@@ -103,6 +103,8 @@ type reminderProviderError struct {
 	cause   error
 }
 
+var errReminderEventElapsed = errors.New("reminder event elapsed during delivery")
+
 func (e *reminderProviderError) Error() string {
 	return e.channel + " reminder provider delivery failed"
 }
@@ -587,6 +589,11 @@ func (s *ReminderScheduler) deliverOne(ctx context.Context, job models.ReminderJ
 	}
 
 	if err := s.sendJob(ctx, calendar, &cfg, job); err != nil {
+		if errors.Is(err, errReminderEventElapsed) {
+			jobLog.Info("Reminder event elapsed during fanout; canceling owned delivery")
+			s.cancelClaim(ctx, job)
+			return
+		}
 		if errors.Is(err, models.ErrClaimLost) || ctx.Err() != nil {
 			jobLog.Info("Reminder delivery stopped: claim lost or context canceled", "error", err)
 			return
@@ -716,7 +723,10 @@ func (s *ReminderScheduler) backoff(attempt int) time.Duration {
 // deliveryContext renews immediately before EACH external send, not once for
 // an entire participant fanout. Renewal and delivery share a deadline shorter
 // than the lease, leaving time to record the result. Lost claims stop fanout.
-func (s *ReminderScheduler) deliveryContext(ctx context.Context, job models.ReminderJob) (context.Context, context.CancelFunc, error) {
+func (s *ReminderScheduler) deliveryContext(ctx context.Context, calendar *calendarModels.Calendar, job models.ReminderJob) (context.Context, context.CancelFunc, error) {
+	if !s.eventMidnight(job.EventDate, s.timezoneOf(calendar)).After(s.now()) {
+		return nil, nil, errReminderEventElapsed
+	}
 	bounded, cancel := context.WithTimeout(ctx, reminderSendTimeout)
 	if err := bounded.Err(); err != nil {
 		cancel()
@@ -787,7 +797,7 @@ func (s *ReminderScheduler) sendOwnerChat(
 	if sent {
 		return nil
 	}
-	sendCtx, cancel, err := s.deliveryContext(ctx, job)
+	sendCtx, cancel, err := s.deliveryContext(ctx, calendar, job)
 	if err != nil {
 		return err
 	}
@@ -841,7 +851,7 @@ func (s *ReminderScheduler) sendParticipantEmails(ctx context.Context, calendar 
 			continue
 		}
 		if err := s.sendEmail(ctx, calendar, job, *p.Email, p.Locale, &p.ID); err != nil {
-			if errors.Is(err, models.ErrClaimLost) || ctx.Err() != nil {
+			if errors.Is(err, models.ErrClaimLost) || errors.Is(err, errReminderEventElapsed) || ctx.Err() != nil {
 				return err
 			}
 			s.logger.Error("Failed to send participant reminder email",
@@ -897,7 +907,7 @@ func (s *ReminderScheduler) sendEmail(
 		"recipient_ref", pkglog.Fingerprint(to),
 		"is_owner", participantID == nil)
 
-	sendCtx, cancel, err := s.deliveryContext(ctx, job)
+	sendCtx, cancel, err := s.deliveryContext(ctx, calendar, job)
 	if err != nil {
 		return err
 	}
