@@ -75,9 +75,9 @@
           </button>
         </div>
 
-        <!-- Email Notification Section (if notifications enabled for participants) -->
+        <!-- Email Notification Section (if the calendar allows participant mail AND this instance can send email) -->
         <ParticipantEmailPanel
-          v-if="notificationsEnabled"
+          v-if="emailPanelVisible"
           :token="token"
           :participant-id="participantId"
           :email="participant.email"
@@ -252,6 +252,7 @@ import { useParticipantCalendar } from '@/composables/calendar/useParticipantCal
 import { useParticipantDisplaySettings } from '@/composables/calendar/useParticipantDisplaySettings';
 import { useCalendarStream } from '@/composables/calendar/useCalendarStream';
 import { translateErrorMessage } from '@/utils/errorTranslator';
+import { useSmtpProbe } from '@/utils/smtpProbe';
 import type {
   Availability,
   AvailabilityItem,
@@ -309,6 +310,14 @@ const participant = computed(() => {
 
 const notificationsEnabled = computed(() => calendar.value?.notify_participants === true);
 
+// Whether the instance has SMTP configured. The participant-email gate is the
+// calendar's policy *and* this capability: without mail the panel would offer a
+// form whose sends could never leave the server (and the backend now refuses).
+// A failed probe hides the panel too — the safe answer for a form that sends.
+const { state: smtpProbeState, probe: probeSmtp } = useSmtpProbe();
+const emailPanelVisible = computed(
+  () => notificationsEnabled.value && smtpProbeState.value === 'available'
+);
 // How the calendar is drawn, and the persistence of that choice. Only the two settings
 // that move the visible date range refetch; the week's hours and slot size do not.
 const { displayMode, viewStyle, numberOfPeriods, startHour, endHour, slotDuration, restore } =
@@ -1127,5 +1136,8 @@ onMounted(async () => {
   // Calling loadCalendar() here as well fetched the calendar, its recurrences and the
   // whole range summary a second time on every mount.
   await handleCancelFromEmail();
+
+  // Email capability (read-only; a probe failure simply keeps the panel hidden).
+  probeSmtp();
 });
 </script>

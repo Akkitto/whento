@@ -73,6 +73,7 @@ func TestBuildHandlers(t *testing.T) {
 			{name: "participant", got: h.participant},
 			{name: "notifyConfig", got: h.notifyConfig},
 			{name: "participantEmail", got: h.participantEmail},
+			{name: "reminders", got: h.reminders},
 			{name: "availability", got: h.availability},
 			{name: "recurrence", got: h.recurrence},
 			{name: "events", got: h.events},
