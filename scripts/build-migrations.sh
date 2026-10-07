@@ -3,38 +3,83 @@
 # Copyright (C) 2025 WhenTo Contributors
 # SPDX-License-Identifier: BSL-1.1
 
-set -e
+set -eu
 
-BUILD_TYPE=${1:-selfhosted}
-OUTPUT_DIR=${2:-./migrations-build}
+# Assemble the migration chain (common + one variant) into an output directory.
+#
+# Safety contract:
+#   - BUILD_TYPE is validated BEFORE anything touches the output directory, so an
+#     invalid type cannot wipe a caller-supplied broad path.
+#   - The output directory must be empty or nonexistent. The builder never
+#     deletes anything: a non-empty OUTPUT_DIR is an error, not a cleanup, so an
+#     accidental path (`.`), the repository root, or some other directory with
+#     content cannot be destroyed by an rm -rf hidden inside the script.
+#   - The wrapper (scripts/migrate.sh) supplies its own fresh mktemp directory,
+#     so concurrent invocations each get a distinct, disposable chain.
 
-echo "Building migrations for: $BUILD_TYPE"
+validate_build_type() {
+    case "$1" in
+        selfhosted | cloud) return 0 ;;
+        *)
+            echo "Error: unknown BUILD_TYPE '$1' (expected 'selfhosted' or 'cloud')" >&2
+            exit 2
+            ;;
+    esac
+}
 
-# Clean output directory
-rm -rf "$OUTPUT_DIR"
-mkdir -p "$OUTPUT_DIR"
+prepare_output_dir() {
+    dir="$1"
+    if [ -z "$dir" ] || [ "$dir" = "/" ]; then
+        echo "Error: refusing to write migrations into '$dir'" >&2
+        exit 2
+    fi
+    if [ ! -e "$dir" ]; then
+        mkdir -p "$dir"
+        return 0
+    fi
+    if [ ! -d "$dir" ]; then
+        echo "Error: '$dir' exists and is not a directory; refusing to overwrite it" >&2
+        exit 2
+    fi
+    if [ -n "$(ls -A "$dir" 2>/dev/null)" ]; then
+        echo "Error: '$dir' is not empty; refusing to remove existing content. Use a fresh directory." >&2
+        exit 2
+    fi
+    return 0
+}
+
+BUILD_TYPE=${1:-}
+OUTPUT_DIR=${2:-}
+
+if [ -z "$BUILD_TYPE" ] || [ -z "$OUTPUT_DIR" ]; then
+    echo "Usage: $0 <selfhosted|cloud> <empty-or-new-output-directory>" >&2
+    exit 2
+fi
+
+validate_build_type "$BUILD_TYPE"
+prepare_output_dir "$OUTPUT_DIR"
+
+echo "Building $BUILD_TYPE migrations into '$OUTPUT_DIR'..." >&2
 
 # Copy common migrations (always included)
-if [ -d "./migrations/common" ]; then
-  echo "Copying common migrations..."
-  cp migrations/common/*.sql "$OUTPUT_DIR/"
+if [ ! -d "./migrations/common" ]; then
+    echo "Error: ./migrations/common does not exist" >&2
+    exit 1
 fi
+cp migrations/common/*.sql "$OUTPUT_DIR/"
 
 # Copy build-specific migrations
-if [ "$BUILD_TYPE" = "cloud" ]; then
-  if [ -d "./migrations/cloud" ]; then
-    echo "Copying cloud migrations..."
-    cp migrations/cloud/*.sql "$OUTPUT_DIR/"
-  fi
-elif [ "$BUILD_TYPE" = "selfhosted" ]; then
-  if [ -d "./migrations/selfhosted" ]; then
-    echo "Copying selfhosted migrations..."
-    cp migrations/selfhosted/*.sql "$OUTPUT_DIR/"
-  fi
-else
-  echo "Error: Unknown build type: $BUILD_TYPE"
-  exit 1
-fi
+case "$BUILD_TYPE" in
+    cloud)
+        if [ -d "./migrations/cloud" ]; then
+            cp migrations/cloud/*.sql "$OUTPUT_DIR/"
+        fi
+        ;;
+    selfhosted)
+        if [ -d "./migrations/selfhosted" ]; then
+            cp migrations/selfhosted/*.sql "$OUTPUT_DIR/"
+        fi
+        ;;
+esac
 
-echo "Migrations built successfully in $OUTPUT_DIR"
-ls -1 "$OUTPUT_DIR"
+echo "Migrations built: $(find "$OUTPUT_DIR" -maxdepth 1 -name '*.sql' | wc -l) sql files" >&2
