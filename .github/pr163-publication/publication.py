@@ -23,15 +23,18 @@ INITIAL = "2ea39819d2c2c7b4c808a1cbc4ec4751fd304315"
 # PR 173 was reviewed and squash-merged with additional security fixes. Topic 3
 # must start from that accepted tree, not the original pre-review source-2 tip.
 REVIEWED_BACKEND_MERGE = "f33ec7d916804610706bd589d95193fb0cc3fc22"
+# PR 180 and the maintainer's #183/#184 follow-ups are the accepted base for
+# topic 4. Separate reviewed source refs retain the original frozen snapshots.
+REVIEWED_BOOTSTRAP_FOLLOWUPS = "a1e698d05ac2cb03bdac676832c348b75e35d636"
 TOPICS = [
     ("ci-compose", "6d928b6080f037767eb5507a82adc4a199363704"),
     ("backend-hardening", "963b270ecc0559ae93909f3b2a3c3d4ed35c7cee"),
     ("bootstrap-password", "06e4a94ba76c771db2e09bee945d122ed17ca3a2"),
-    ("durable-reminders", "6f7f9e1a09aef3d4fd6e7c07de87ab4c61017587"),
-    ("holiday-compatibility", "953861319d6baeb00ce94709ffa3e2de8067ede4"),
-    ("dashboard-ordering", "dbeb7896b269483ca3e2987f1c0cda680ed8aa16"),
-    ("session-coordination", "002fe8495a4ec9d739a043072e3e4325c7250010"),
-    ("safe-migrations", "88c285e635d7ef39724b0fcdde1af13f03faa676"),
+    ("durable-reminders", "af307512a7cb4e6c92892c816b2f7c42a390dd58"),
+    ("holiday-compatibility", "14a5c88b566fc19902302cd6cd8a415dc4841d35"),
+    ("dashboard-ordering", "d0d087f4252f2573723e314613aaa341f73991ae"),
+    ("session-coordination", "f8ac2360e75473d44658b1a49ee949340f761b0c"),
+    ("safe-migrations", "9a6cedf9549ba397adf185d24cb6b15f186111ca"),
 ]
 ROOT = Path(__file__).resolve().parent
 SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -160,7 +163,15 @@ def source_base(number):
         return INITIAL
     if number == 3:
         return REVIEWED_BACKEND_MERGE
+    if number == 4:
+        return REVIEWED_BOOTSTRAP_FOLLOWUPS
     return TOPICS[number - 2][1]
+
+
+def source_ref(number):
+    """Select the trusted frozen ref, never a ref supplied by a plan artifact."""
+    prefix = "codex/pr163-reviewed-20261007-" if number >= 4 else "codex/pr163-"
+    return prefix + TOPICS[number - 1][0]
 
 
 def replay_changelog(base, source, current):
@@ -254,7 +265,7 @@ def prepare(repo, plan, directory):
     git(repo, "fetch", "--no-tags", UPSTREAM_URL, "main")
     if git(repo, "rev-parse", "FETCH_HEAD") != plan["upstream"]:
         raise RuntimeError("Upstream moved; wait for the next scheduled run")
-    git(repo, "fetch", "--no-tags", FORK_URL, f"refs/heads/codex/pr163-{slug}")
+    git(repo, "fetch", "--no-tags", FORK_URL, "refs/heads/" + source_ref(number))
     if git(repo, "rev-parse", "FETCH_HEAD") != source:
         raise RuntimeError("Audited topic changed; review and update the frozen source")
     base = source_base(number)
@@ -347,12 +358,12 @@ def publish(repo, payload, artifact):
         raise RuntimeError("PR state changed during testing; no branch published")
     if get_json(f"/repos/{UPSTREAM}/commits/main")["sha"] != payload["upstream"]:
         raise RuntimeError("Upstream moved during verification; retry next run")
-    if remote_head("codex/pr163-" + payload["slug"]) != source:
+    if remote_head(source_ref(number)) != source:
         raise RuntimeError("Audited source changed during testing; no branch published")
     git(repo, "fetch", "--no-tags", UPSTREAM_URL, "main")
     if git(repo, "rev-parse", "FETCH_HEAD") != payload["upstream"]:
         raise RuntimeError("Upstream moved after the API check; retry next run")
-    git(repo, "fetch", "--no-tags", FORK_URL, "refs/heads/codex/pr163-" + payload["slug"])
+    git(repo, "fetch", "--no-tags", FORK_URL, "refs/heads/" + source_ref(number))
     if git(repo, "rev-parse", "FETCH_HEAD") != source:
         raise RuntimeError("Audited source moved after the API check; no publication")
     git(repo, "bundle", "verify", str(artifact / "candidate.bundle"))

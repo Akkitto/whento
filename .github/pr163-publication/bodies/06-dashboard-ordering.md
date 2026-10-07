@@ -11,6 +11,6 @@ Related to #163; focused PR 6 of 8. Submit after holiday compatibility is merged
 
 ## Verification
 
-Own-branch Go 1.27.1 race tests pass for both modules/builds. Frontend type-check, lint, formatting and all 838 unit tests pass. All 10 dashboard keyboard browser cases pass; the final 72-case desktop/mobile harness also passes with a live backend running, proving preview isolation.
+The publication gate reruns frontend type/lint/format checks, coverage and four shuffle seeds, dashboard keyboard and desktop/mobile browser tests, real-backend tests, both Go module/build-variant race matrices and deployment builds. The successful verification run is linked below. The isolated preview rejects unexpected network requests; keyboard tests cover reordering, boundary focus and announcements.
 
 No schema migration. Preferences are browser-local `localStorage` state, not server-synchronized settings.

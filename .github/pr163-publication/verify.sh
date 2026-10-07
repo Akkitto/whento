@@ -38,6 +38,8 @@ if rg -q 'validate-compose:' .github/workflows/ci.yml; then
     DB_PASSWORD=ci-only REDIS_PASSWORD=ci-only SELFHOSTED_IMAGE=ghcr.io/when-to/whento:ci-placeholder \
       docker compose -f "$file" config -q
   done
+  # PR 180's deployment contract must remain true in every later topic.
+  python3 scripts/check-bootstrap-compose.py
 fi
 (
   cd frontend

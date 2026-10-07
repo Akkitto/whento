@@ -49,7 +49,8 @@ which never executes candidate application code.
   checks, coverage, four shuffle seeds, both builds; both browser suites against
   disposable services, including the short-TTL session server when applicable;
   the migration acceptance suite when present; all three Docker build paths and
-  Compose parsing after the independent CI/Compose PR is present.
+  Compose parsing and bootstrap-key forwarding after the independent CI/Compose
+  and bootstrap PRs are present.
 - Repeat merge/ref checks after testing. Create the missing
   `codex/pr163-submit-<topic>` branch only. An empty creation lease makes even an
   intervening owner-created branch impossible to overwrite.
@@ -72,6 +73,21 @@ merge, topics 3–8 were explicitly refreshed and their frozen IDs updated toget
 topic 3 now uses the accepted merge `f33ec7d` as its patch base. Original source
 history is preserved by the `codex/pr163-before-refresh-20261005-safe-migrations`
 archive branch; do not open a PR for that cumulative archive.
+
+After PR 180 merged, topics 4–8 were reviewed again on accepted upstream
+`a1e698d` (including #183/#184 and dependency updates #181/#182). Their frozen
+sources now use separate `codex/pr163-reviewed-20261007-<topic>` refs. Original
+source refs and all previously published submission branches remain untouched.
+Topic 4's owning patch starts at that accepted upstream commit; topics 5–8 start
+at the preceding refreshed source. The session topic resolves the bootstrap
+interceptor overlap while retaining the merged wrong-key regression tests.
+These reviewed source refs are snapshots, **not branches to open PRs for**.
+Only `codex/pr163-submit-<topic>` branches get the ready-to-open links.
+
+Run `37668832226` stopped correctly when upstream merged #183/#184 between
+planning and preparation. The current-main equality guard is deliberate: a new
+run plans against the new main rather than publishing an untested or stale base.
+Another upstream change during verification likewise requires a fresh run.
 
 Submission branches are created one at a time as
 prerequisites merge. No force-update of an existing branch is possible. Disable
@@ -97,5 +113,10 @@ and bundle. They also replay bootstrap directly on the actual reviewed PR 173
 merge and verify its security files are preserved, and reproduce the original
 four conflicts as a negative regression. Fixtures use private temporary
 repositories and never push remotely.
+They additionally reproduce the upstream-moved stop and original session
+interceptor conflict, and verify preservation of accepted bootstrap files,
+request-ID logging, manual recovery transactions, and dependency updates in
+every remaining source. The publisher tests check the new reviewed source ref
+without changing the normal creation-only submission destination.
 The real application gate deliberately refuses to run outside GitHub Actions to
 avoid mistaking an operator's database for disposable test infrastructure.

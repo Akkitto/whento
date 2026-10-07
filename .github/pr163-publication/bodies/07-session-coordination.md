@@ -14,6 +14,6 @@ Related to #163; focused PR 7 of 8. Submit after dashboard ordering is merged.
 
 ## Verification
 
-Own-branch frontend checks and all 946 unit tests pass. The final stack passes all four shuffled seeds plus coverage, all 27 real-backend browser cases (including production-origin two-minute rotation), and all 72 desktop/mobile harness cases. Go 1.27.1 race tests pass for both workspace modules and both build variants.
+The publication gate reruns frontend static checks, coverage and four shuffle seeds, both browser suites (including production-origin two-minute rotation), both Go module/build-variant race matrices and deployment builds. The successful verification run is linked below. The refreshed interceptor preserves PR #180's wrong-bootstrap-key regressions and the merged bootstrap behavior; credential rejection never refreshes or signs out a healthy session.
 
 No schema migration beyond the prerequisite stack. Without Web Locks, fallback coordination cannot guarantee cross-tab HTTP Set-Cookie ordering; this limitation is retained explicitly. Logout may redirect a protected route; ordinary rotation/account replacement does not use reload loops.

@@ -2,6 +2,7 @@
 
 import importlib.util
 import itertools
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -29,6 +30,17 @@ def plan(number=3):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_candidate_gate_retains_bootstrap_compose_contract(self):
+        self.assertIn("python3 scripts/check-bootstrap-compose.py", (pub.ROOT / "verify.sh").read_text())
+
+    def test_reviewed_source_refs_are_trusted_and_do_not_replace_submissions(self):
+        self.assertEqual(pub.source_ref(3), "codex/pr163-bootstrap-password")
+        for number in range(4, 9):
+            self.assertEqual(pub.source_ref(number),
+                             "codex/pr163-reviewed-20261007-" + pub.TOPICS[number - 1][0])
+            self.assertNotIn("submit-", pub.source_ref(number))
+        self.assertEqual(pub.source_base(4), pub.REVIEWED_BOOTSTRAP_FOLLOWUPS)
+
     def test_postgres_probe_uses_disposable_service_role_and_database(self):
         workflow = (pub.ROOT.parent / "workflows" / "pr163-publication.yml").read_text()
         self.assertIn("POSTGRES_USER: test", workflow)
@@ -263,8 +275,8 @@ class MakefileTests(unittest.TestCase):
 
 
 class PublisherTests(unittest.TestCase):
-    def run_publisher(self, *, moved=False, parent_extra=False, unrelated=False, already_exists=False):
-        payload = dict(plan(), candidate="c" * 40)
+    def run_publisher(self, *, number=3, moved=False, parent_extra=False, unrelated=False, already_exists=False):
+        payload = dict(plan(number), candidate="c" * 40)
         fetched = ""
         calls = []
         def command(repo, *args, **kwargs):
@@ -283,8 +295,9 @@ class PublisherTests(unittest.TestCase):
         with patch.dict(os.environ, {"PUBLISH_TOKEN": "synthetic-only", "GIT_TRACE_CURL": "1"}, clear=True), \
                 patch.object(pub, "read_pulls", return_value=[]), \
                 patch.object(pub, "select_topic", return_value=(0, None, []) if already_exists else
-                             (3, {"merge_commit_sha": payload["prerequisite_merge"]}, [])), \
-                patch.object(pub, "remote_head", return_value=payload["source"]), \
+                             (number, {"merge_commit_sha": payload["prerequisite_merge"]}, [])), \
+                patch.object(pub, "remote_head", side_effect=lambda ref:
+                             payload["source"] if ref == pub.source_ref(number) else ""), \
                 patch.object(pub, "get_json", return_value={"sha": payload["upstream"]}), \
                 patch.object(pub, "git", side_effect=command), \
                 patch("builtins.print"):
@@ -313,6 +326,15 @@ class PublisherTests(unittest.TestCase):
     def test_second_upstream_race_check_stops_before_push(self):
         self.assertFalse(any("push" in args for args, _ in self.run_publisher(moved=True)))
 
+    def test_refreshed_topic_checks_its_new_frozen_source_and_creates_normal_submission(self):
+        calls = self.run_publisher(number=4)
+        self.assertIn(("fetch", "--no-tags", pub.FORK_URL,
+                       "refs/heads/codex/pr163-reviewed-20261007-durable-reminders"),
+                      [args for args, _ in calls])
+        pushes = [args for args, _ in calls if "push" in args]
+        self.assertEqual(len(pushes), 1)
+        self.assertIn("--force-with-lease=refs/heads/codex/pr163-submit-durable-reminders:", pushes[0])
+
     def test_multi_parent_candidate_stops_before_push(self):
         self.assertFalse(any("push" in args for args, _ in self.run_publisher(parent_extra=True)))
 
@@ -338,11 +360,72 @@ class RealHistoryTests(unittest.TestCase):
         original_git = pub.git
         def local_git(directory, *args, **kwargs):
             if args[0] == "fetch":
+                if args[2] == pub.FORK_URL:
+                    self.assertEqual(args[3], "refs/heads/" + pub.source_ref(payload["number"]))
                 fetched = payload["upstream"] if args[2] == pub.UPSTREAM_URL else payload["source"]
                 return original_git(directory, "fetch", "--no-tags", str(repo), fetched)
             return original_git(directory, *args, **kwargs)
         with patch.object(pub, "git", side_effect=local_git):
             return pub.prepare(repo, payload, candidate)
+
+    def test_upstream_move_before_prepare_leaves_no_candidate(self):
+        # Exact race in run 37668832226: #183/#184 merged after plan.
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = self.clone(temporary)
+            candidate = Path(temporary) / "candidate"
+            payload = dict(plan(4), upstream="5e96abf5381379311734cd56bfa92c3667bace57",
+                           prerequisite_merge="5e96abf5381379311734cd56bfa92c3667bace57")
+            original_git = pub.git
+            def moved_git(directory, *args, **kwargs):
+                if args[0] == "fetch":
+                    return original_git(directory, "fetch", "--no-tags", str(repo),
+                                        pub.REVIEWED_BOOTSTRAP_FOLLOWUPS)
+                return original_git(directory, *args, **kwargs)
+            with patch.object(pub, "git", side_effect=moved_git), self.assertRaisesRegex(RuntimeError, "Upstream moved"):
+                pub.prepare(repo, payload, candidate)
+            self.assertFalse(candidate.exists())
+
+    def test_remaining_sources_preserve_accepted_bootstrap_and_maintainer_followups(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = self.clone(temporary)
+            baseline = pub.REVIEWED_BOOTSTRAP_FOLLOWUPS
+            protected = (
+                "README.md", "internal/auth/service/bootstrap_service.go",
+                "internal/auth/service/bootstrap_service_test.go",
+                "internal/auth/handlers/bootstrap_handler.go",
+                "internal/auth/handlers/bootstrap_handler_test.go",
+                "internal/auth/service/auth_service.go", "pkg/httputil/response.go",
+                "pkg/logger/logger.go", "pkg/logger/logger_test.go",
+                "migrations/common/019_app_state.up.sql", "migrations/common/019_app_state.down.sql",
+                "docker-compose.yml", "docker-compose.dev.yml", ".devcontainer/docker-compose.yml",
+                "scripts/check-bootstrap-compose.py", "scripts/swagger-contract-check/main.go",
+                "cmd/ci_workflow_test.go",
+            )
+            baseline_lock = json.loads(pub.read_blob(repo, baseline, "frontend/package-lock.json"))["packages"]
+            for number in range(4, 9):
+                source = pub.TOPICS[number - 1][1]
+                with self.subTest(topic=number):
+                    pub.git(repo, "merge-base", "--is-ancestor", baseline, source)
+                    for path in protected:
+                        with self.subTest(path=path):
+                            self.assertEqual(pub.read_blob(repo, source, path), pub.read_blob(repo, baseline, path))
+                    lock = json.loads(pub.read_blob(repo, source, "frontend/package-lock.json"))["packages"]
+                    for dependency in ("postcss-selector-parser", "source-map-js"):
+                        key = "node_modules/" + dependency
+                        self.assertEqual(lock[key], baseline_lock[key])
+                    self.assertIn("'/auth/bootstrap?source=setup'", pub.read_blob(repo, source, "frontend/src/api/client.test.ts"))
+
+    def test_original_session_patch_conflicts_on_reviewed_bootstrap_interceptor(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = self.clone(temporary)
+            pub.git(repo, "checkout", "--detach", pub.TOPICS[5][1])
+            old_patch = pub.git(repo, "diff", "--binary", "--no-ext-diff", "--no-textconv",
+                                "dbeb7896b269483ca3e2987f1c0cda680ed8aa16",
+                                "002fe8495a4ec9d739a043072e3e4325c7250010", "--", ".",
+                                ":(exclude)CHANGELOG.md", ":(exclude)Makefile", raw=True)
+            result = pub.git(repo, "apply", "--3way", "--index", input=old_patch, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(pub.git(repo, "diff", "--name-only", "--diff-filter=U"), "frontend/src/api/client.ts")
 
     def test_all_six_topics_after_reviewed_squashed_prerequisites_and_upstream_notes(self):
         for number, extra_note in itertools.product(range(3, 9), (False, True)):

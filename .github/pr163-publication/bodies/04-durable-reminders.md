@@ -18,4 +18,4 @@ Additive common migration 020 `reminder_jobs`. External email delivery is **at l
 
 ## Verification
 
-Own-branch Go 1.27.1 race tests pass for both modules and both builds against migrated PostgreSQL. Frontend checks and all 758 unit tests pass, including SMTP outage/recovery and explicit-disable regressions. Backend tests exercise claims, stale-worker fencing, concurrent schedulers, retries, cancellation/consent and date transitions.
+The publication gate requires database-backed Go race tests for both modules and build variants, frontend type/lint/format/coverage checks and four shuffle seeds, both browser suites, Compose/bootstrap contracts and all three Docker builds. The successful verification run is linked below. Backend tests exercise claims, stale-worker fencing, concurrent schedulers, retries, cancellation/consent and date transitions; frontend tests cover SMTP outage/recovery and explicit disable.
