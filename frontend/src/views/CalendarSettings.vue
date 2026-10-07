@@ -907,7 +907,7 @@ async function handleUpdate() {
 
 async function handleSaveNotifications(config: NotifyConfig) {
   try {
-    // SMTP capability never overwrites the owner's explicit consent edit.
+    // SMTP capability controls delivery and the UI, not the owner's saved choice.
     await updateNotifyConfig(calendarId, applySmtpProbeToConfig(config, smtpProbe.value));
     toastStore.success(t('calendar.settingsSaved'));
   } catch (error: any) {
