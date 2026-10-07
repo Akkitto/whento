@@ -103,6 +103,13 @@ func isOutageError(err error) bool {
 	return !errors.As(err, &redisErr)
 }
 
+// A caller cancelling its request says nothing about Redis's health. A transport
+// deadline with a still-live caller context remains an outage signal.
+func isCallerError(ctx context.Context, err error) bool {
+	return errors.Is(err, context.Canceled) ||
+		(errors.Is(err, context.DeadlineExceeded) && ctx.Err() != nil)
+}
+
 func (h *circuitBreakerHook) closeIfNeeded(prev int64) {
 	if prev == 0 {
 		return
@@ -118,12 +125,20 @@ func (h *circuitBreakerHook) DialHook(next redis.DialHook) redis.DialHook {
 
 func (h *circuitBreakerHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 	return func(ctx context.Context, cmd redis.Cmder) error {
+		if err := ctx.Err(); err != nil {
+			cmd.SetErr(err)
+			return err
+		}
 		prev := h.openedAt.Load()
 		if prev != 0 && time.Now().UnixNano() < prev {
 			cmd.SetErr(ErrRedisCircuitOpen)
 			return ErrRedisCircuitOpen
 		}
 		err := next(ctx, cmd)
+		if isCallerError(ctx, err) {
+			// Neither trip nor close a half-open breaker on a cancelled probe.
+			return err
+		}
 		if isOutageError(err) {
 			h.tripIfNeeded(prev, err)
 			return err
@@ -135,6 +150,12 @@ func (h *circuitBreakerHook) ProcessHook(next redis.ProcessHook) redis.ProcessHo
 
 func (h *circuitBreakerHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
 	return func(ctx context.Context, cmds []redis.Cmder) error {
+		if err := ctx.Err(); err != nil {
+			for _, cmd := range cmds {
+				cmd.SetErr(err)
+			}
+			return err
+		}
 		prev := h.openedAt.Load()
 		if prev != 0 && time.Now().UnixNano() < prev {
 			for _, cmd := range cmds {
@@ -143,6 +164,9 @@ func (h *circuitBreakerHook) ProcessPipelineHook(next redis.ProcessPipelineHook)
 			return ErrRedisCircuitOpen
 		}
 		err := next(ctx, cmds)
+		if isCallerError(ctx, err) {
+			return err
+		}
 		if isOutageError(err) {
 			h.tripIfNeeded(prev, err)
 			return err

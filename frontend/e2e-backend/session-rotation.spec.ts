@@ -81,6 +81,7 @@ test.describe('two-page forced refresh (short-TTL backend)', () => {
       countB.capturedRefreshFamilies.length = 0;
       const rowsBefore = await countRefreshTokenRows(DATABASE_URL, loginFamily);
       const refreshesBefore = countA.authRefresh + countB.authRefresh;
+      const identityReadsBefore = countA.authMe + countB.authMe;
 
       // Wait for the proactive refresh: with the 2-minute TTL the client schedules it
       // at TTL - 60s = 60s. Bounded: the cookie lock lets one tab rotate, the other
@@ -110,7 +111,7 @@ test.describe('two-page forced refresh (short-TTL backend)', () => {
       // rotated token as a new session it would have re-run /auth/me and reloaded.
       expect(countA.documentResponses).toBe(navA);
       expect(countB.documentResponses).toBe(navB);
-      expect(countA.authMe + countB.authMe).toBeLessThanOrEqual(4);
+      expect(countA.authMe + countB.authMe).toBe(identityReadsBefore);
 
       // Each observed rotation retains its consumed ancestor and inserts a
       // successor. Only unexplained growth is a session-minting regression.

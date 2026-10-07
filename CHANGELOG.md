@@ -179,6 +179,9 @@ line per release rather than listed individually.
 
 ### Fixed
 
+- Cancelling an HTTP request no longer opens the shared Redis circuit breaker
+  or briefly blocks other users' session checks; cancelled probes do not mark
+  an unhealthy dependency as recovered. Transport outages still fail closed.
 - Registered the bcrypt byte-limit validator used by reset requests, restoring
   the reset endpoint and rejecting passwords over 72 UTF-8 bytes without a panic.
 - Mailbox endpoints distinguish invalid proofs from logged server failures
