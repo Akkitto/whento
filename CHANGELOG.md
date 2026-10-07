@@ -57,7 +57,7 @@ line per release rather than listed individually.
 - A reminder scheduler (`internal/notify/service`) wired into `cmd` that issues,
   claims and delivers persisted reminder jobs, re-arms canceled deliveries
   within the catch-up window once availability/config return, and renews its
-  claim lease immediately before the external send. The operator tunables are
+  claim lease immediately before each bounded external send. The operator tunables are
   exposed as `REMINDER_HOURS_BEFORE`, `REMINDER_INTERVAL`,
   `REMINDER_CATCH_UP_WINDOW`, `REMINDER_MAX_ATTEMPTS` and
   `REMINDER_RETRY_BACKOFF`.
@@ -138,7 +138,6 @@ line per release rather than listed individually.
   created") carry the request id, and the startup message names
   `BOOTSTRAP_KEY_FILE` as well as `BOOTSTRAP_KEY` as the key's source.
 
----
 - **Reminder delivery is a durable, fenced queue.** Reminders are persisted in
   a `reminder_jobs` table (migration `020`) and delivered by a scheduler loop:
   each job is claimed atomically under a per-acquisition UUID claim token and a
@@ -155,8 +154,9 @@ line per release rather than listed individually.
   shifts cannot move a scheduled instant onto the wrong date.
 - **Transient errors never cancel an event.** A failed count/availability query
   while verifying a claimed job retries that job with backoff; only an
-  authoritatively confirmed non-qualifying event cancels its pending
-  deliveries. No longer does one bad read silently kill every reminder for an
+  authoritatively confirmed non-qualifying event cancels the worker's own
+  claim. Each other delivery rechecks eligibility without an unfenced event-wide
+  cancellation. No longer does one bad read silently kill every reminder for an
   event.
 - **Email is gated on real SMTP, re-read at delivery.** With no mailer
   configured the scheduler enqueues no email jobs (chat channels are
@@ -170,6 +170,15 @@ line per release rather than listed individually.
   | error`: a failed probe shows a retryable warning. Neither a failed probe nor
   unavailable SMTP rewrites saved `email.enabled`; only an explicit owner edit
   changes that preference. Capability still gates delivery and new enablement.
+  Saved consent can be explicitly disabled even while SMTP is unavailable, and
+  stale capability responses cannot overwrite a newer probe result.
+- **Reminder timing and shutdown are bounded.** Rescheduling later cannot retain
+  an earlier claim time; elapsed calendar-local events are not reminded. Retry
+  delays saturate before arithmetic overflow and use each job's stored attempt
+  limit. Invalid operator tunables fail startup instead of silently falling back.
+  Every provider send renews the claim and honors a shorter context deadline,
+  including each recipient in a slow fanout. Lost claims/shutdown stop further
+  sends; chat delivery ledger failures are retried rather than ignored.
 
 ## [v2.0.0] — 2026-08-18
 
