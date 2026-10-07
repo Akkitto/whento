@@ -37,8 +37,8 @@ import (
 func newUser(ctx context.Context, t *testing.T, pool *pgxpool.Pool, configure ...func(*models.User)) *models.User {
 	t.Helper()
 
-	// A user row is instance-wide state as far as the readiness and admin-invariant
-	// tests are concerned; serialize against them (and against the other packages'
+	// A user row is instance-wide state as far as the first-user tests are
+	// concerned; serialize against them (and against the other packages'
 	// fixtures) for the test's lifetime. A no-op when the calling test already
 	// holds the lock.
 	dbtest.LockSingletonAccounts(ctx, t, pool)
@@ -452,24 +452,59 @@ func TestListAndCountSeeCreatedUsers(t *testing.T) {
 	}
 }
 
-// TestDetermineRoleAtomically covers the count-under-advisory-lock role
-// decision that makes the first registrar of an instance the administrator:
-// an empty table reports "admin", any table that already holds a user reports
-// "user", and racing calls serialize on the advisory lock so the shared count
-// is never read inconsistently.
-func TestDetermineRoleAtomically(t *testing.T) {
+// markerFixture owns the durable first_user_created flag for a test. Every test
+// in this file (and the rest of the suite) shares one database, and the flag is
+// instance state rather than a per-test row — so a test that reasons about "this
+// instance has never been bootstrapped" must save the current value, set the
+// value it needs, and restore the original on cleanup, the same way it owns its
+// user rows.
+//
+// ctx comes from the caller (contextcheck: a subtest holding a context must not
+// let a helper silently fall back to context.Background()). The cleanup deadline
+// is derived from it, detached from its cancellation so a failing/expired test
+// can still restore the flag it borrowed (see dbtest.CleanupContext).
+func markerFixture(ctx context.Context, t *testing.T, pool *pgxpool.Pool, want bool) {
+	t.Helper()
+
+	// The marker is the other half of the instance-wide account state; the
+	// first-user tests take the lock before calling this, and this call is a
+	// no-op when they did.
+	dbtest.LockSingletonAccounts(ctx, t, pool)
+
+	var prior bool
+	if err := pool.QueryRow(ctx, `SELECT first_user_created FROM app_state WHERE id = 1`).Scan(&prior); err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE app_state SET first_user_created = $1, updated_at = now() WHERE id = 1`, want); err != nil {
+		t.Fatalf("set marker: %v", err)
+	}
+	t.Cleanup(func() {
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		if _, err := pool.Exec(cctx, `UPDATE app_state SET first_user_created = $1, updated_at = now() WHERE id = 1`, prior); err != nil {
+			t.Logf("restore marker: %v", err)
+		}
+	})
+}
+
+// TestCreateFirstUser covers the atomic bootstrap slot: the first call on an
+// empty table inserts the admin, and any later call is refused with
+// ErrFirstUserExists.
+func TestCreateFirstUser(t *testing.T) {
 	pool := dbtest.Pool(t)
 	repo := repository.NewUserRepository(pool)
 	ctx := dbtest.Context(t)
 
-	// Which branch applies is decided by instance-wide state — the user count —
-	// not by rows this test owns. Another package's DB tests run as a concurrent
-	// process and take the same advisory lock when they register a user, so
-	// holding it for this test's whole lifetime is what keeps the count stable
-	// between the read below and the assertions that follow (the audit caught a
-	// package inserting and then cleaning up a user mid-test, flipping the
-	// expected outcome).
+	// Which branch applies is decided by instance-wide state — the user count and
+	// app_state flag — not by rows this test owns. Another package's DB tests run
+	// as a concurrent process and take the same advisory lock when they create a
+	// user, so holding it for this test's whole lifetime is what makes the branch
+	// decided here still hold at the assertion below (the audit caught a package
+	// inserting and then cleaning up a user between the count snapshot and the
+	// call, flipping the expected outcome).
 	dbtest.LockSingletonAccounts(ctx, t, pool)
+
+	first := newUser(ctx, t, pool)
 
 	// The shared database may or may not already hold users; document which
 	// branch the rest of this test is in. The count is owned by the lock above,
@@ -480,68 +515,40 @@ func TestDetermineRoleAtomically(t *testing.T) {
 	}
 	alreadyPopulated := count > 0
 
-	role, err := repo.DetermineRoleAtomically(ctx)
-	if err != nil {
-		t.Fatalf("DetermineRoleAtomically: %v", err)
-	}
+	// TestCreateFirstUserConcurrent may have owned the marker before us; reset
+	// it so this test's success-path run actually exercises the empty-track
+	// insert rather than inheriting a stuck flag. Restored by the fixture.
+	markerFixture(ctx, t, pool, false)
+
+	err = repo.CreateFirstUser(ctx, first)
 	if alreadyPopulated {
-		// The slot is taken globally; every call must read the ordinary role.
-		if role != models.RoleUser {
-			t.Fatalf("DetermineRoleAtomically on a populated instance = %q, want %q", role, models.RoleUser)
+		// The slot is taken globally; the insert must be refused, not half-applied.
+		if !errors.Is(err, repository.ErrFirstUserExists) {
+			t.Fatalf("CreateFirstUser on a populated instance = %v, want ErrFirstUserExists", err)
 		}
 		return
 	}
 
-	// The first count on an empty instance is the bootstrap admin, and the
-	// ordinary role only after a user actually exists.
-	if role != models.RoleAdmin {
-		t.Fatalf("DetermineRoleAtomically on an empty instance = %q, want %q", role, models.RoleAdmin)
-	}
-
-	// Racing calls on the same empty table. Each goroutine drives its own
-	// single-connection pool (so the two really run on independent connections,
-	// not two slots of one pool queue), held behind a start barrier so both can
-	// be in flight together. The advisory-locked transaction serializes them;
-	// both must read the same empty table and neither may fail.
-	racy := make([]*repository.UserRepository, 2)
-	for i := range racy {
-		racy[i] = repository.NewUserRepository(newSingleConnPool(t, ctx))
-	}
-	start := make(chan struct{})
-	results := make(chan string, 2)
-	for i := range racy {
-		r := racy[i]
-		go func() {
-			<-start
-			role, err := r.DetermineRoleAtomically(ctx)
-			if err != nil {
-				results <- "error: " + err.Error()
-				return
-			}
-			results <- role
-		}()
-	}
-	close(start)
-	for range racy {
-		if role := <-results; role != models.RoleAdmin {
-			t.Fatalf("racing DetermineRoleAtomically on an empty table: %s, want %s", role, models.RoleAdmin)
-		}
-	}
-
-	// Insert one user, then the same call must report the ordinary role: the
-	// first-user window is closed by the row itself, not by anything the caller
-	// remembers.
-	user := newUser(ctx, t, pool)
-	if err := repo.Create(ctx, user); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	role, err = repo.DetermineRoleAtomically(ctx)
 	if err != nil {
-		t.Fatalf("DetermineRoleAtomically after a user: %v", err)
+		t.Fatalf("CreateFirstUser on an empty instance: %v", err)
 	}
-	if role != models.RoleUser {
-		t.Fatalf("DetermineRoleAtomically after one user = %q, want %q", role, models.RoleUser)
+	// Own the row the insert created: it must not leak into the shared table and
+	// flip the empty-table precondition of TestCreateFirstUserConcurrent.
+	dbtest.CleanupContext(ctx, t, pool, `DELETE FROM users WHERE id = $1`, first.ID)
+
+	// The slot is now taken; a second call must be refused.
+	second := newUser(ctx, t, pool)
+	if err := repo.CreateFirstUser(ctx, second); !errors.Is(err, repository.ErrFirstUserExists) {
+		t.Fatalf("second CreateFirstUser = %v, want ErrFirstUserExists", err)
+	}
+
+	// No stray row was left behind by the refused insert.
+	got, err := repo.GetByID(ctx, second.ID)
+	if err == nil {
+		t.Fatalf("the refused insert created a row: %+v", got)
+	}
+	if !errors.Is(err, repository.ErrUserNotFound) {
+		t.Fatalf("GetByID after a refused insert = %v, want ErrUserNotFound", err)
 	}
 }
 
@@ -561,6 +568,245 @@ func newSingleConnPool(t *testing.T, ctx context.Context) *pgxpool.Pool {
 	}
 	t.Cleanup(p.Close)
 	return p
+}
+
+func TestFirstUserCreatedNormalReadsAreReadOnly(t *testing.T) {
+	pool := dbtest.Pool(t)
+	ctx := dbtest.Context(t)
+	dbtest.LockSingletonAccounts(ctx, t, pool)
+	readOnlyPool := newSingleConnPool(t, ctx)
+	// MaxConns=1 keeps every repository call on the session made read-only.
+	if _, err := readOnlyPool.Exec(ctx, `SET default_transaction_read_only = on`); err != nil {
+		t.Fatal(err)
+	}
+	repo := repository.NewUserRepository(readOnlyPool)
+	for _, closed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("closed=%t", closed), func(t *testing.T) {
+			markerFixture(ctx, t, pool, closed)
+			if !closed {
+				var hasUsers bool
+				if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM users)`).Scan(&hasUsers); err != nil {
+					t.Fatal(err)
+				}
+				if hasUsers {
+					t.Skip("empty-state read requires an empty test database")
+				}
+			}
+			for i := 0; i < 2; i++ {
+				got, err := repo.FirstUserCreated(ctx)
+				if err != nil || got != closed {
+					t.Fatalf("read-only marker read = %t, %v; want %t", got, err, closed)
+				}
+			}
+		})
+	}
+}
+
+// TestCreateFirstUserConcurrent is the regression test for the first-user race:
+// two callers — two registrations, or a registration and a bootstrap — racing
+// from an empty table. Each goroutine drives its own single-connection pool (so
+// the two really run on independent connections, not two slots of one pool
+// queue), held behind a start barrier so both can be in flight together, and
+// the advisory-locked transaction must let exactly one through. More than one
+// admin on an empty instance is the exact defect the atomic slot exists to rule
+// out (see the first worktree audit: the split count-then-insert let a loser
+// read zero users, lose the race, and still insert itself as admin).
+func TestCreateFirstUserConcurrent(t *testing.T) {
+	pool := dbtest.Pool(t)
+	ctx := dbtest.Context(t)
+
+	// The race needs the table to be empty at the start and stays meaningful
+	// only for as long as nothing else inserts or removes users. Own the
+	// instance-wide account state for the whole test, so the empty-table check
+	// below is decided from state that cannot be invalidated by another
+	// concurrently running package binary.
+	dbtest.LockSingletonAccounts(ctx, t, pool)
+
+	// Only meaningful against an empty table: the race is over the *first* row.
+	existing := repository.NewUserRepository(pool)
+	if count, err := existing.Count(ctx); err != nil {
+		t.Fatalf("Count: %v", err)
+	} else if count > 0 {
+		t.Skip("the shared database already has users; the first-user race cannot be exercised")
+	}
+
+	// A prior test on this shared database may have flipped the durable marker
+	// (TestCreateFirstUser sets it, then deletes its user). Each subtest owns the
+	// flag for the duration of its own race and restores it at its end.
+	racyPool := func(t *testing.T) *pgxpool.Pool {
+		return newSingleConnPool(t, ctx)
+	}
+
+	t.Run("two racing registrations create exactly one user", func(t *testing.T) {
+		markerFixture(ctx, t, pool, false)
+		start := make(chan struct{})
+		type outcome struct {
+			repo *repository.UserRepository
+			user *models.User
+			err  error
+		}
+		run := func(configure ...func(*models.User)) func() outcome {
+			repo := repository.NewUserRepository(racyPool(t))
+			user := newUser(ctx, t, pool, configure...)
+			return func() outcome {
+				return outcome{repo: repo, user: user, err: repo.CreateFirstUser(ctx, user)}
+			}
+		}
+
+		a := run(func(u *models.User) {
+			u.DisplayName = "Racer A"
+			u.Role = models.RoleAdmin
+		})
+		b := run(func(u *models.User) {
+			u.DisplayName = "Racer B"
+			u.Role = models.RoleAdmin
+		})
+
+		results := make(chan outcome, 2)
+		go func() { <-start; results <- a() }()
+		go func() { <-start; results <- b() }()
+		close(start)
+
+		first, second := <-results, <-results
+		winners := 0
+		for _, o := range []outcome{first, second} {
+			switch {
+			case o.err == nil:
+				winners++
+			case !errors.Is(o.err, repository.ErrFirstUserExists):
+				t.Fatalf("racer error = %v, want nil or ErrFirstUserExists", o.err)
+			}
+		}
+		if winners != 1 {
+			t.Fatalf("winners = %d (got errors %v, %v), want exactly 1", winners, first.err, second.err)
+		}
+
+		// Exactly one admin exists in the shared table afterwards.
+		count, err := existing.Count(ctx)
+		if err != nil {
+			t.Fatalf("Count after the race: %v", err)
+		}
+		if count != 1 {
+			t.Fatalf("users after the race = %d, want 1 (two registrations must not both become admin)", count)
+		}
+	})
+
+	t.Run("two bootstrap contenders create exactly one user", func(t *testing.T) {
+		markerFixture(ctx, t, pool, false)
+		start := make(chan struct{})
+		type outcome struct {
+			err error
+		}
+		run := func(configure ...func(*models.User)) func() outcome {
+			repo := repository.NewUserRepository(racyPool(t))
+			user := newUser(ctx, t, pool, configure...)
+			return func() outcome {
+				return outcome{err: repo.CreateFirstUser(ctx, user)}
+			}
+		}
+
+		reg := run(func(u *models.User) {
+			u.DisplayName = "Bootstrap contender A"
+			u.Role = models.RoleAdmin
+		})
+		bt := run(func(u *models.User) {
+			u.DisplayName = "Bootstrap contender B"
+			u.Role = models.RoleAdmin
+		})
+
+		results := make(chan outcome, 2)
+		go func() { <-start; results <- reg() }()
+		go func() { <-start; results <- bt() }()
+		close(start)
+
+		first, second := <-results, <-results
+		winners := 0
+		for _, o := range []outcome{first, second} {
+			switch {
+			case o.err == nil:
+				winners++
+			case !errors.Is(o.err, repository.ErrFirstUserExists):
+				t.Fatalf("racer error = %v, want nil or ErrFirstUserExists", o.err)
+			}
+		}
+		if winners != 1 {
+			t.Fatalf("winners = %d (got errors %v, %v), want exactly 1", winners, first.err, second.err)
+		}
+
+		count, err := existing.Count(ctx)
+		if err != nil {
+			t.Fatalf("Count after the race: %v", err)
+		}
+		if count != 1 {
+			t.Fatalf("users after the race = %d, want 1", count)
+		}
+	})
+}
+
+// TestHasUsers covers the EXISTS-based emptiness check the public status
+// endpoint is built on.
+func TestHasUsers(t *testing.T) {
+	pool := dbtest.Pool(t)
+	repo := repository.NewUserRepository(pool)
+	ctx := dbtest.Context(t)
+
+	// The assertion compares two reads of instance-wide state: a user another
+	// package's fixture inserts or removes between the Count and HasUsers calls
+	// would flip the pairing. Own the singleton account state for the test so
+	// the pairing cannot be disturbed mid-run.
+	dbtest.LockSingletonAccounts(ctx, t, pool)
+
+	count, err := repo.Count(ctx)
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+
+	has, err := repo.HasUsers(ctx)
+	if err != nil {
+		t.Fatalf("HasUsers: %v", err)
+	}
+	if has != (count > 0) {
+		t.Errorf("HasUsers = %t with %d users", has, count)
+	}
+}
+
+// TestFirstUserCreatedReconcilesLegacyCreates covers the rolling-upgrade
+// split-brain: migration 019 ran against an empty database (marker FALSE), and
+// then a pre-019 binary — still serving during the rollout — created the first
+// user through the plain Create path, which predates the marker. FirstUserCreated
+// must answer TRUE (exactly what a fresh installation would have recorded) and
+// self-heal the marker so the split cannot reopen bootstrap.
+func TestFirstUserCreatedReconcilesLegacyCreates(t *testing.T) {
+	pool := dbtest.Pool(t)
+	repo := repository.NewUserRepository(pool)
+	ctx := dbtest.Context(t)
+
+	markerFixture(ctx, t, pool, false)
+
+	// Recreate the rollout window on purpose: the pre-019 binary inserts the first
+	// user through plain Create, which (then and now) never touches the marker, so
+	// the marker stays FALSE under a real row.
+	legacy := newUser(ctx, t, pool)
+	if err := repo.Create(ctx, legacy); err != nil {
+		t.Fatalf("Create (legacy path): %v", err)
+	}
+
+	corrected, err := repo.FirstUserCreated(ctx)
+	if err != nil {
+		t.Fatalf("FirstUserCreated: %v", err)
+	}
+	if !corrected {
+		t.Fatal("FirstUserCreated = false while users exist after the split-brain; want true")
+	}
+
+	// The self-heal must be durable, not just a one-off boolean.
+	var stored bool
+	if err := pool.QueryRow(ctx, `SELECT first_user_created FROM app_state WHERE id = 1`).Scan(&stored); err != nil {
+		t.Fatalf("read marker after reconcile: %v", err)
+	}
+	if !stored {
+		t.Fatal("marker still false after FirstUserCreated reconciled it")
+	}
 }
 
 // adminSnapshot locks the admin-membership advisory lock (2) and returns the

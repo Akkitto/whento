@@ -58,16 +58,19 @@ type fakeUserRepo struct {
 	listErr               error
 	deleteErr             error
 	roleSetErr            error
-	// role and roleErr feed DetermineRoleAtomically: the fake's answer to "am I
-	// the first or an ordinary registration?". Tests that want the first-user
-	// path set role to admin via the options.nextRole fixture knob.
-	role    string
-	roleErr error
 
 	created         *models.User
 	passwordUpdated string
 	roleUpdated     string
 	deleted         uuid.UUID
+
+	// firstUserCreatedCalls counts FirstUserCreated invocations so a test can
+	// prove a cached status read does not reach the store.
+	firstUserCreatedCalls int
+	// firstUserCreatedErr makes FirstUserCreated fail, so a test can pin that a
+	// registration on an unreadable marker surfaces as ErrRegistrationState
+	// rather than being mistaken for "no users".
+	firstUserCreatedErr error
 }
 
 var _ UserRepository = (*fakeUserRepo)(nil)
@@ -96,11 +99,19 @@ func (f *fakeUserRepo) Create(_ context.Context, user *models.User) error {
 	return nil
 }
 
-// DetermineRoleAtomically is the fake's role decision. The real repository takes
-// an advisory lock and counts rows; the fake answers from a knob so tests can
-// choose first-user (admin) or ordinary paths directly.
-func (f *fakeUserRepo) DetermineRoleAtomically(context.Context) (string, error) {
-	return f.role, f.roleErr
+// CreateFirstUser mirrors the SQL's atomic slot: the count check and the insert
+// are one decision, so a racing bootstrap cannot both pass it.
+func (f *fakeUserRepo) CreateFirstUser(_ context.Context, user *models.User) error {
+	if len(f.byID) > 0 {
+		return repository.ErrFirstUserExists
+	}
+	if f.createErr != nil {
+		return f.createErr
+	}
+	f.created = user
+	f.add(user)
+
+	return nil
 }
 
 func (f *fakeUserRepo) GetByID(_ context.Context, id uuid.UUID) (*models.User, error) {
@@ -157,6 +168,14 @@ func (f *fakeUserRepo) Delete(_ context.Context, id uuid.UUID) error {
 	f.deleted = id
 
 	return f.deleteErr
+}
+
+func (f *fakeUserRepo) FirstUserCreated(context.Context) (bool, error) {
+	f.firstUserCreatedCalls++
+	if f.firstUserCreatedErr != nil {
+		return false, f.firstUserCreatedErr
+	}
+	return len(f.byID) > 0, nil
 }
 
 func (f *fakeUserRepo) List(context.Context) ([]*models.User, error) {
@@ -470,10 +489,7 @@ type fixture struct {
 type options struct {
 	allowRegistration bool
 	allowedEmails     []string
-	// nextRole is what DetermineRoleAtomically answers. admin exercises the
-	// first-user path; any other value the "everyone else" path.
-	nextRole string
-	mfa      *mfaModels.UserMFA
+	mfa               *mfaModels.UserMFA
 }
 
 func newFixture(t *testing.T, configure func(*options)) *fixture {
@@ -482,13 +498,12 @@ func newFixture(t *testing.T, configure func(*options)) *fixture {
 	// ALLOWED_EMAILS defaults to ["*"] in config.Load, so that is the honest default
 	// here. An empty list is not a "no restriction" value — EmailMatches fails closed
 	// on it, which TestRegisterEmptyAllowListDeniesEveryone covers.
-	opts := options{allowRegistration: true, nextRole: models.RoleUser, allowedEmails: []string{"*"}}
+	opts := options{allowRegistration: true, allowedEmails: []string{"*"}}
 	if configure != nil {
 		configure(&opts)
 	}
 
 	users := newFakeUserRepo()
-	users.role = opts.nextRole
 	tokens := newFakeTokenRepo()
 	users.passwordChanged = func(ctx context.Context, id uuid.UUID) error { _, err := tokens.DeleteByUserID(ctx, id); return err }
 	mfa := &fakeMFARepo{mfa: opts.mfa}
@@ -529,47 +544,94 @@ func (f *fixture) withUser(t *testing.T, email, password, role string) *models.U
 
 // --- registration ---------------------------------------------------------------
 
-func TestRegisterFirstUserBecomesAdmin(t *testing.T) {
-	// The role is decided by DetermineRoleAtomically (count under an advisory
-	// lock), so that concurrent first registrations cannot all award themselves
-	// admin. The fixture's nextRole knob stands in for that decision and points
-	// at the first-user path.
-	fixture := newFixture(t, func(o *options) { o.nextRole = models.RoleAdmin })
+func TestRegistrationRequiresBootstrapFirst(t *testing.T) {
+	// The divergence from the open-registration-bootstrap design: the very first
+	// account exists only through /bootstrap and its boot key. Ordinary
+	// registration on an instance that has never had a user is refused with
+	// ErrBootstrapRequired regardless of ALLOWED_REGISTER or the allow-list, and
+	// creates nothing.
+	for _, allow := range []bool{true, false} {
+		fixture := newFixture(t, func(o *options) {
+			o.allowRegistration = allow
+			o.allowedEmails = []string{"first@example.com"}
+		})
+
+		_, err := fixture.service.Register(context.Background(), &models.RegisterRequest{
+			Email: "first@example.com", Password: "Str0ng!Passw0rd", DisplayName: "First",
+		})
+		if !errors.Is(err, ErrBootstrapRequired) {
+			t.Fatalf("allowRegistration=%v: first registration = %v, want ErrBootstrapRequired", allow, err)
+		}
+		if fixture.users.created != nil {
+			t.Fatalf("allowRegistration=%v: a registration before bootstrap created a user", allow)
+		}
+	}
+}
+
+func TestRegisterOnAnUnreadableMarkerSurfacesErrRegistrationState(t *testing.T) {
+	// A failed read of the durable first-user marker must not be interpreted as
+	// "no users" (which would reopen the pre-claimed slot); it is a retryable
+	// service error the handler maps to 503.
+	fixture := newFixture(t, nil)
+	fixture.users.firstUserCreatedErr = errors.New("app_state is unreachable")
+
+	_, err := fixture.service.Register(context.Background(), &models.RegisterRequest{
+		Email: "first@example.com", Password: "Str0ng!Passw0rd", DisplayName: "First",
+	})
+	if !errors.Is(err, ErrRegistrationState) {
+		t.Fatalf("registration on an unreadable marker = %v, want ErrRegistrationState", err)
+	}
+	if !errors.Is(err, fixture.users.firstUserCreatedErr) {
+		t.Fatalf("registration error lost the marker read cause: %v", err)
+	}
+	if fixture.users.created != nil {
+		t.Fatal("a user was created although the bootstrap state was unreadable")
+	}
+}
+
+func TestRegisterIsBlockedForEveryoneWhenDisabled(t *testing.T) {
+	// Registration off is a boundary, not a convenience: once the instance has
+	// been bootstrapped, the very next account is refused too — there is no
+	// registrant that outranks the gate. A closed instance stands up through
+	// /bootstrap (with its boot key), not through the registration gate. This is
+	// the test that keeps ALLOWED_REGISTER=false from becoming a cosmetic setting.
+	fixture := newFixture(t, func(o *options) {
+		o.allowRegistration = false
+		o.allowedEmails = []string{"owner@example.com"}
+	})
+	fixture.withUser(t, "existing@example.com", "Str0ng!Passw0rd", models.RoleAdmin)
+
+	_, err := fixture.service.Register(context.Background(), &models.RegisterRequest{
+		Email: "owner@example.com", Password: "Str0ng!Passw0rd", DisplayName: "Owner",
+	})
+	if !errors.Is(err, ErrRegistrationDisabled) {
+		t.Fatalf("registration when disabled = %v, want ErrRegistrationDisabled", err)
+	}
+	if fixture.users.created != nil {
+		t.Fatal("a user was created while registration is disabled")
+	}
+}
+
+func TestRegisterAfterBootstrapCreatesARegularUser(t *testing.T) {
+	// The steady-state path: the instance was bootstrapped (its first account
+	// exists, created through /bootstrap as admin), so a subsequent registration
+	// is an ordinary account — never an administrator. Admin is awarded only by
+	// the bootstrap flow, never by the register form.
+	fixture := newFixture(t, nil)
+	fixture.withUser(t, "admin@example.com", "Str0ng!Passw0rd", models.RoleAdmin)
 
 	response, err := fixture.service.Register(context.Background(), &models.RegisterRequest{
-		Email: "first@example.com", Password: "Str0ng!Passw0rd", DisplayName: "First",
+		Email: "second@example.com", Password: "Str0ng!Passw0rd", DisplayName: "Second",
 	})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
-	if fixture.users.created.Role != models.RoleAdmin {
-		t.Errorf("role = %q, want admin", fixture.users.created.Role)
+	if got := fixture.users.created.Role; got != models.RoleUser {
+		t.Errorf("role = %q, want user (admin is only ever created by bootstrap)", got)
 	}
 	if response.AccessToken == "" || response.RefreshToken == "" {
 		t.Error("registration did not return a token pair")
-	}
-}
-
-func TestRegisterRestrictionsDoNotApplyToTheFirstUser(t *testing.T) {
-	// An operator standing up a closed instance must still be able to create their own
-	// account, so the very first registration bypasses both gates (registration
-	// disabled and the email allow-list). With DetermineRoleAtomically reporting an
-	// admin (empty-instance) read, the first account lands as the administrator with
-	// no allow-list gate in front of it.
-	fixture := newFixture(t, func(o *options) {
-		o.nextRole = models.RoleAdmin
-		o.allowRegistration = false
-		o.allowedEmails = []string{"nobody@example.com"}
-	})
-
-	if _, err := fixture.service.Register(context.Background(), &models.RegisterRequest{
-		Email: "owner@example.com", Password: "Str0ng!Passw0rd", DisplayName: "Owner",
-	}); err != nil {
-		t.Fatalf("the first registration was refused: %v", err)
-	}
-	if got := fixture.users.created.Role; got != models.RoleAdmin {
-		t.Errorf("role = %q, want admin", got)
 	}
 }
 
@@ -609,16 +671,19 @@ func TestRegisterRespectsRestrictionsForEveryoneElse(t *testing.T) {
 		},
 	}
 
-	// The DetermineRoleAtomically read reports a non-admin role (the fixture's
-	// default), so every case below exercises the "everyone else" path rather
-	// than the first-user-admin exemption.
+	fixture := newFixture(t, nil)
+	// Restrictions only ever apply once the instance has a first user. Seed one
+	// so every case below exercises the "everyone else" path rather than the
+	// first-user-admin exemption.
+	fixture.withUser(t, "existing@example.com", "Str0ng!Passw0rd", models.RoleAdmin)
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fixture := newFixture(t, func(o *options) {
-				o.nextRole = models.RoleUser
 				o.allowRegistration = tt.allow
 				o.allowedEmails = tt.allowedEmails
 			})
+			fixture.withUser(t, "existing@example.com", "Str0ng!Passw0rd", models.RoleAdmin)
 
 			_, err := fixture.service.Register(context.Background(), &models.RegisterRequest{
 				Email: tt.email, Password: "Str0ng!Passw0rd", DisplayName: "Someone",
@@ -633,6 +698,7 @@ func TestRegisterRespectsRestrictionsForEveryoneElse(t *testing.T) {
 
 func TestRegisterRejectsADuplicateEmail(t *testing.T) {
 	fixture := newFixture(t, nil)
+	fixture.withUser(t, "existing@example.com", "Str0ng!Passw0rd", models.RoleAdmin)
 	fixture.users.createErr = repository.ErrUserAlreadyExists
 
 	_, err := fixture.service.Register(context.Background(), &models.RegisterRequest{
@@ -647,6 +713,7 @@ func TestRegisterRejectsADuplicateEmail(t *testing.T) {
 func TestRegisterStoresAHashRatherThanThePassword(t *testing.T) {
 	const password = "Str0ng!Passw0rd"
 	fixture := newFixture(t, nil)
+	fixture.withUser(t, "existing@example.com", "Str0ng!Passw0rd", models.RoleAdmin)
 
 	if _, err := fixture.service.Register(context.Background(), &models.RegisterRequest{
 		Email: "hash@example.com", Password: password, DisplayName: "Hash",
@@ -678,6 +745,7 @@ func TestRegisterLocale(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fixture := newFixture(t, nil)
+			fixture.withUser(t, "existing@example.com", "Str0ng!Passw0rd", models.RoleAdmin)
 
 			if _, err := fixture.service.Register(context.Background(), &models.RegisterRequest{
 				Email: "locale@example.com", Password: "Str0ng!Passw0rd",
@@ -972,6 +1040,10 @@ func TestExpiresInDescribesTheTokenItCameWith(t *testing.T) {
 
 	manager := testJWTWithExpiry(t, accessExpiry)
 	users := newFakeUserRepo()
+	// The instance must be bootstrapped before an ordinary registration can
+	// run; seed the first (admin) user so the test reaches the session-issuance
+	// path whose token it is asserting on.
+	users.add(&models.User{Email: "existing@example.test", Role: models.RoleAdmin})
 	service := NewAuthService(
 		users, newFakeTokenRepo(), &fakeMFARepo{}, manager, newCountingCache(),
 		bcrypt.MinCost, true, []string{"*"},
@@ -1342,9 +1414,11 @@ func TestPasskeyLoginIssuesAFullSession(t *testing.T) {
 // which is arguably the right reading of "allow these addresses: none".
 func TestRegisterEmptyAllowListDeniesEveryone(t *testing.T) {
 	fixture := newFixture(t, func(o *options) {
-		o.nextRole = models.RoleUser
 		o.allowedEmails = nil
 	})
+	// The "everyone else" path only exists once the instance has a first user;
+	// the first account is the admin and always welcome.
+	fixture.withUser(t, "existing@example.com", "Str0ng!Passw0rd", models.RoleAdmin)
 
 	_, err := fixture.service.Register(context.Background(), &models.RegisterRequest{
 		Email: "someone@example.com", Password: "Str0ng!Passw0rd", DisplayName: "Someone",

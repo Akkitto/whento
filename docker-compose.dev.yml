@@ -2,6 +2,9 @@
 # The backend runs on the host via `go run` (see `make dev-db` / `make dev-app`),
 # so postgres and redis must be reachable on localhost — their ports are
 # intentionally exposed here, unlike the production docker-compose.yml.
+# The host backend loads .env itself. Set BOOTSTRAP_KEY or BOOTSTRAP_KEY_FILE
+# there (the latter is a host-readable path). These infrastructure containers
+# do not consume application bootstrap secrets.
 
 services:
   postgres:

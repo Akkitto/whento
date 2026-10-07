@@ -116,7 +116,83 @@ The application is accessible at `http://localhost:8080`
 
 ### First Account
 
-The **first registered user** automatically becomes an administrator.
+**The first administrator requires the operator's one-time bootstrap key.**
+Public registration cannot create the first account, even with
+`ALLOWED_REGISTER=true`. This also applies when upgrading an already-deployed
+database that is empty when migration `019_app_state` first runs. Visit
+`/bootstrap` and provide the key, email, display name and a strong password. This
+account is email-verified and signed in immediately, so first-run setup does not
+depend on working SMTP.
+Later public registrations, if enabled, create ordinary `user` accounts.
+
+If no key is pinned, read the generated key in the app's startup logs:
+
+```bash
+docker compose logs app
+```
+
+**Anyone who can read those logs before setup can claim the administrator.**
+Limit log access and complete setup promptly. In production, prefer a pinned,
+random secret (for example, generated with `openssl rand -hex 32`), ideally
+provided through `BOOTSTRAP_KEY_FILE` rather than a visible container environment
+value. Configured keys are not printed. Keys must contain 32–256 Unicode code
+points in production (16–256 in development); length alone does not ensure
+randomness. Set the same key on every replica.
+
+To pin it directly, set `BOOTSTRAP_KEY` in `.env`. Alternatively, set
+`BOOTSTRAP_KEY_FILE=/run/secrets/bootstrap_key` in `.env` and supply a readable
+secret file at that path **inside the app container**. Compose forwards the
+variable; it does not mount the file for you. For example, add this bind mount
+to the app's existing `volumes` list, preserving its `whento_keys` mount:
+
+```yaml
+- ./secrets/bootstrap_key:/run/secrets/bootstrap_key:ro
+```
+
+Keep secret files out of Git and restrict their permissions while ensuring the
+container's unprivileged app user can read them. Configure either the direct key
+or the file, not both. Apply changed environment values by recreating the app
+(`docker compose up -d app`); a plain container restart retains its environment.
+The devcontainer also forwards both variables, with paths inside that container.
+`docker-compose.dev.yml` starts only the database and Redis: the host-run backend
+loads `.env` directly, so its `_FILE` path must be readable on the host.
+
+An unpinned key changes on every restart until setup completes; use the latest
+startup key. Successful setup permanently closes bootstrap, across replicas,
+restarts and later account deletion. A session-creation failure after the account
+was committed also closes bootstrap: sign in with the credentials just created
+instead of trying to create another administrator.
+
+#### Existing users but no administrator
+
+Migration `019_app_state` backfills the permanent marker when any users exist.
+It does **not** promote them. Bootstrap is therefore closed even if those users
+are all ordinary accounts. An operator with database access must promote a
+known, trusted account manually; public registration cannot recover admin access.
+
+Back up the database first (see [backup and restore](docs/backup-restore.md)),
+stop every app replica, and inspect the existing users in `psql`. In the example
+below, replace the UUID with the exact id of your trusted account. The extra
+condition refuses the change if an administrator already exists:
+
+```sql
+BEGIN;
+SELECT id, email, role FROM users ORDER BY created_at;
+UPDATE users
+SET role = 'admin', updated_at = now()
+WHERE id = 'REPLACE-WITH-TRUSTED-USER-UUID'::uuid
+  AND NOT EXISTS (SELECT 1 FROM users WHERE role = 'admin')
+RETURNING id, role;
+-- COMMIT only after verifying exactly the intended account was returned.
+COMMIT;
+```
+
+Use `ROLLBACK` instead if the result is not the intended single account. Restart
+the app replicas and sign out/sign back in to obtain a token with the new role.
+Never reset `app_state.first_user_created`, delete users, or roll back migration
+019 to reopen bootstrap; those are not recovery procedures. A previously
+configured database with no remaining users requires operator-led account/data
+recovery from backup, not another public bootstrap.
 
 ---
 

@@ -334,6 +334,95 @@ export interface paths {
     };
     trace?: never;
   };
+  '/api/v1/auth/bootstrap': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Bootstrap the first user
+     * @description Creates the first (administrator) account of an unconfigured instance. Requires the boot key, which is either set via BOOTSTRAP_KEY or printed to the server logs at startup. The endpoint closes forever once a user exists.
+     */
+    post: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      /** @description Boot key and first-user credentials */
+      requestBody: {
+        content: {
+          'application/json': components['schemas']['models.BootstrapRequest'];
+        };
+      };
+      responses: {
+        /** @description Created */
+        201: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['models.AuthResponse'];
+          };
+        };
+        /** @description Invalid request body or validation error */
+        400: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['httputil.ErrorResponse'];
+          };
+        };
+        /** @description Invalid bootstrap key */
+        401: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['httputil.ErrorResponse'];
+          };
+        };
+        /** @description Instance already configured */
+        409: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['httputil.ErrorResponse'];
+          };
+        };
+        /** @description Rate limit exceeded */
+        429: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['httputil.ErrorResponse'];
+          };
+        };
+        /** @description Bootstrap or session creation failed */
+        500: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['httputil.ErrorResponse'];
+          };
+        };
+      };
+    };
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/api/v1/auth/forgot-password': {
     parameters: {
       query?: never;
@@ -1203,7 +1292,7 @@ export interface paths {
     put?: never;
     /**
      * Register a new user
-     * @description Creates a new user account. First registered user automatically becomes admin.
+     * @description Creates a new user account on an instance that has already been bootstrapped (its first account exists). A fresh instance refuses registration with 403 BOOTSTRAP_REQUIRED until POST /api/v1/auth/bootstrap has created the first (administrator) account.
      */
     post: {
       parameters: {
@@ -1237,7 +1326,7 @@ export interface paths {
             'application/json': components['schemas']['httputil.ErrorResponse'];
           };
         };
-        /** @description Registration disabled or email not allowed */
+        /** @description Registration disabled, email not allowed, or bootstrap required */
         403: {
           headers: {
             [name: string]: unknown;
@@ -1257,6 +1346,15 @@ export interface paths {
         };
         /** @description Rate limit exceeded */
         429: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['httputil.ErrorResponse'];
+          };
+        };
+        /** @description Registration state could not be determined */
+        503: {
           headers: {
             [name: string]: unknown;
           };
@@ -1387,6 +1485,63 @@ export interface paths {
         };
       };
     };
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  '/api/v1/auth/status': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Bootstrap and registration status
+     * @description Reports whether the instance still needs its first account created (bootstrap) and whether open registration is enabled. Public: the frontend gates its register button and /bootstrap route on it, and automation polls it before bootstrapping.
+     */
+    get: {
+      parameters: {
+        query?: never;
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody?: never;
+      responses: {
+        /** @description OK */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['models.BootstrapStatusResponse'];
+          };
+        };
+        /** @description Rate limit exceeded */
+        429: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['httputil.ErrorResponse'];
+          };
+        };
+        /** @description Bootstrap state temporarily unavailable */
+        503: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['httputil.ErrorResponse'];
+          };
+        };
+      };
+    };
+    put?: never;
+    post?: never;
     delete?: never;
     options?: never;
     head?: never;
@@ -4774,6 +4929,30 @@ export interface components {
     };
     'models.BackupCodesResponse': {
       backup_codes?: string[];
+    };
+    'models.BootstrapRequest': {
+      boot_key: string;
+      /**
+       * @description DisplayName and Locale match RegisterRequest; see its comment about the
+       *     paired `max`/`maxbytes` password tags.
+       */
+      display_name: string;
+      email: string;
+      /** @enum {string} */
+      locale?: 'fr' | 'en';
+      password: string;
+    };
+    'models.BootstrapStatusResponse': {
+      /**
+       * @description NeedsBootstrap is true until the durable first-user slot is claimed.
+       *     Deleting accounts later never reopens it.
+       */
+      needs_bootstrap?: boolean;
+      /**
+       * @description RegistrationEnabled is ALLOWED_REGISTER && !NeedsBootstrap. Ordinary
+       *     registration is available only after operator bootstrap has completed.
+       */
+      registration_enabled?: boolean;
     };
     'models.CalendarResponse': {
       allow_anonymous_participants?: boolean;

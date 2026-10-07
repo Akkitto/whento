@@ -42,6 +42,12 @@ line per release rather than listed individually.
 
 ### Added
 
+- One-time operator bootstrap at `/bootstrap` and `POST /api/v1/auth/bootstrap`,
+  with a generated startup key or a pinned `BOOTSTRAP_KEY` / `BOOTSTRAP_KEY_FILE`,
+  public capability status, and a durable first-user marker (migration 019).
+  Production and devcontainer Compose forward both settings; secret files must
+  be mounted separately. Wrong-key attempts and committed administrator creation
+  are audited without logging submitted credentials.
 - `validate-compose` CI check: every supported Compose file (`docker-compose.yml`,
   `docker-compose.dev.yml`, `.devcontainer/docker-compose.yml`) must parse and
   interpolate with `docker compose config -q`.
@@ -51,6 +57,16 @@ line per release rather than listed individually.
 
 ### Changed
 
+- **Breaking: public registration no longer creates the first administrator.**
+  Fresh installs and deployed databases empty when migration 019 first runs must
+  complete operator-key bootstrap, even with registration enabled. Read the startup logs
+  for an unpinned key, or pin a random secret (prefer `_FILE` in production).
+  Log readers can claim admin before setup when the generated-key default is used.
+  Existing-user installations are backfilled as configured, without promoting
+  any user; an installation with users but no administrator needs manual SQL
+  promotion of a trusted account. See [First Account](README.md#first-account)
+  for setup, replica configuration and recovery instructions. Account deletion
+  never reopens bootstrap; subsequent registrations remain ordinary users.
 - Production Compose PID limits now agree between the service-level `pids_limit`
   and `deploy.resources.limits.pids` (app 256, postgres 512, redis 128). Compose
   2.20+ refuses a top-level `pids_limit` that disagrees with the deploy-resource

@@ -103,6 +103,8 @@ var wantRoutes = []string{
 	// Auth, public
 	"POST /api/v1/auth/login",
 	"POST /api/v1/auth/register",
+	"POST /api/v1/auth/bootstrap",
+	"GET /api/v1/auth/status",
 	"POST /api/v1/auth/refresh",
 	"POST /api/v1/auth/logout",
 	"POST /api/v1/auth/forgot-password",
@@ -241,6 +243,8 @@ var wantRateLimited = []string{
 	// Per-route buckets
 	"POST /api/v1/auth/login",
 	"POST /api/v1/auth/register",
+	"POST /api/v1/auth/bootstrap",
+	"GET /api/v1/auth/status",
 	"POST /api/v1/auth/refresh",
 	"POST /api/v1/auth/forgot-password",
 	"POST /api/v1/auth/reset-password",

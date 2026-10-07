@@ -188,6 +188,29 @@ describe('apiClient', () => {
   });
 
   describe('signing out across tabs', () => {
+    it.each(['/auth/bootstrap', '/auth/bootstrap?source=setup'])(
+      'preserves the session and original wrong-key error from %s',
+      async endpoint => {
+        apiClient.setToken('existing-session');
+        const posted = vi.spyOn(BroadcastChannel.prototype, 'postMessage');
+        const wrongKey = { code: 'UNAUTHORIZED', message: 'Invalid bootstrap key' };
+        const seen = withAdapter(() => ({
+          status: 401,
+          data: { success: false, error: wrongKey },
+        }));
+
+        await expect(apiClient.post(endpoint, { boot_key: 'wrong-key' })).rejects.toBe(wrongKey);
+
+        expect(seen.map(request => request.url)).toEqual([endpoint]);
+        expect(apiClient.hasSession()).toBe(true);
+        expect(posted).not.toHaveBeenCalled();
+        expect(window.location.href).toBe('');
+        const protectedRequests = withAdapter(() => ok({}));
+        await apiClient.get('/protected');
+        expect(protectedRequests[0].auth).toBe('Bearer existing-session');
+      }
+    );
+
     it('tells the other tabs when the user signs out', () => {
       const posted: unknown[] = [];
       vi.spyOn(BroadcastChannel.prototype, 'postMessage').mockImplementation(m => posted.push(m));

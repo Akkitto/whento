@@ -22,6 +22,9 @@ import (
 var (
 	ErrUserNotFound      = errors.New("user not found")
 	ErrUserAlreadyExists = errors.New("user with this email already exists")
+	// ErrFirstUserExists reports that the instance already has a user, so the
+	// one-time bootstrap slot has been taken.
+	ErrFirstUserExists = errors.New("the instance already has a user")
 	// ErrLastAdmin reports that a demotion or deletion would leave the instance
 	// with zero administrators. An instance must always keep at least one admin
 	// (see the admin invariant in UpdateRole and Delete): zero admins is an
@@ -448,34 +451,146 @@ func (r *UserRepository) Count(ctx context.Context) (int, error) {
 	return count, nil
 }
 
-// DetermineRoleAtomically checks user count under an advisory lock to prevent
-// TOCTOU race conditions where concurrent registrations could all become admin.
-// Returns "admin" if no users exist, "user" otherwise.
-func (r *UserRepository) DetermineRoleAtomically(ctx context.Context) (string, error) {
+// HasUsers answers "is the users table non-empty?" without summing the whole
+// table. The registration fast path historically used it as a
+// bootstrap-completed marker; that role now belongs to the durable
+// app_state.first_user_created flag (see FirstUserCreated), because a mutable
+// account table can be emptied by deletion. HasUsers remains as a plain
+// existence probe for callers that genuinely want to know about current rows.
+func (r *UserRepository) HasUsers(ctx context.Context) (bool, error) {
+	query := `SELECT EXISTS (SELECT 1 FROM users)`
+
+	var has bool
+	err := r.pool.QueryRow(ctx, query).Scan(&has)
+	if err != nil {
+		return false, fmt.Errorf("failed to check users existence: %w", err)
+	}
+
+	return has, nil
+}
+
+// CreateFirstUser is the bootstrap slot: it creates the first user atomically
+// with the durable marker under advisory lock 1. Only the operator-key
+// bootstrap flow calls it; ordinary registration cannot create the first user.
+// Competing replicas can claim exactly one first administrator.
+func (r *UserRepository) CreateFirstUser(ctx context.Context, user *models.User) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return "", fmt.Errorf("failed to begin transaction: %w", err)
+		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// Acquire advisory lock (key 1 = first-user registration)
+	// First-user advisory lock: the one decision "is the table still empty?"
+	// that must be serialised across every replica.
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(1)`); err != nil {
-		return "", fmt.Errorf("failed to acquire advisory lock: %w", err)
+		return fmt.Errorf("failed to acquire advisory lock: %w", err)
 	}
 
-	var count int
-	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM users`).Scan(&count); err != nil {
-		return "", fmt.Errorf("failed to count users: %w", err)
+	// Is the first-user slot still open? The durable app_state marker is the
+	// monotonic authority; EXISTS also detects users inserted by a legacy binary
+	// after migration 019 during a rolling upgrade. The app_state table must
+	// already exist. The lock serialises bootstrap contenders, not legacy writers.
+	//
+	// EXISTS, not COUNT(*): this runs inside the advisory-locked first-user
+	// transaction, so it must not cost a full scan of a table that grows with
+	// every sign-up.
+	var slotTaken bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM users)
+		    OR COALESCE((SELECT first_user_created FROM app_state WHERE id = 1), FALSE)
+	`).Scan(&slotTaken); err != nil {
+		return fmt.Errorf("failed to check for users: %w", err)
+	}
+	if slotTaken {
+		return ErrFirstUserExists
+	}
+
+	query := `
+		INSERT INTO users (id, email, password_hash, display_name, role, locale, timezone, email_verified, verification_token, verification_token_expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		RETURNING created_at, updated_at`
+	err = tx.QueryRow(ctx, query,
+		user.ID,
+		user.Email,
+		user.PasswordHash,
+		user.DisplayName,
+		user.Role,
+		user.Locale,
+		user.Timezone,
+		user.EmailVerified,
+		user.VerificationToken,
+		user.VerificationTokenExpiresAt,
+	).Scan(&user.CreatedAt, &user.UpdatedAt)
+	if err != nil {
+		if dberr.IsUniqueViolation(err) {
+			return ErrUserAlreadyExists
+		}
+		return fmt.Errorf("failed to create user: %w", err)
+	}
+
+	// Flip the durable marker in the same transaction as the insert, so
+	// "bootstrap completed" is committed atomically with the first account and
+	// can never be reverted by later account deletion.
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO app_state (id, first_user_created, updated_at)
+		VALUES (1, TRUE, now())
+		ON CONFLICT (id) DO UPDATE SET first_user_created = TRUE, updated_at = now()
+	`); err != nil {
+		return fmt.Errorf("failed to record first-user marker: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return "", fmt.Errorf("failed to commit transaction: %w", err)
+		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	if count == 0 {
-		return "admin", nil
+	return nil
+}
+
+// FirstUserCreated reports whether a first user has ever been created on this
+// instance. Unlike HasUsers it reads the durable app_state marker, which is set
+// once inside CreateFirstUser's transaction and never cleared, so deleting
+// accounts cannot make the instance "unbootstrapped" again. This is the answer
+// the bootstrap status cache and the registration fast path rely on.
+//
+// The read is self-healing. A rolling upgrade can leave a pre-019 binary serving
+// traffic against a database that has already run migration 019: that binary
+// creates users through the plain Create path, which predates the marker, so the
+// marker alone would disagree with the users table. Normal reads are read-only;
+// only an unreconciled legacy account needs a write to permanently close the
+// slot. The upsert can never downgrade a marker another replica has set.
+func (r *UserRepository) FirstUserCreated(ctx context.Context) (bool, error) {
+	query := `
+		SELECT COALESCE((SELECT first_user_created FROM app_state WHERE id = 1), FALSE),
+		       EXISTS (SELECT 1 FROM users)`
+
+	var created, hasUsers bool
+	err := r.pool.QueryRow(ctx, query).Scan(&created, &hasUsers)
+	if err != nil {
+		// A schema older than 019_app_state has no app_state table, so the
+		// marker read cannot run at all. Fall back to the users table so the
+		// question still has a sensible answer. Postgres reports the missing
+		// table as 42P01.
+		if dberr.HasCode(err, dberr.CodeUndefinedTable) {
+			return r.HasUsers(ctx)
+		}
+		return false, fmt.Errorf("failed to read first-user marker: %w", err)
 	}
-	return "user", nil
+
+	if created || !hasUsers {
+		return created, nil
+	}
+
+	// Observing a legacy user closes the slot even if that user is deleted
+	// before this upsert. A missing singleton is also repaired, not ignored.
+	if _, err := r.pool.Exec(ctx, `
+		INSERT INTO app_state (id, first_user_created, updated_at)
+		VALUES (1, TRUE, now())
+		ON CONFLICT (id) DO UPDATE SET first_user_created = TRUE, updated_at = now()
+		WHERE NOT app_state.first_user_created
+	`); err != nil {
+		return false, fmt.Errorf("failed to reconcile first-user marker: %w", err)
+	}
+	return true, nil
 }
 
 // ExistsByEmail checks if a user exists with the given email

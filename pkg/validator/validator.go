@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/go-playground/validator/v10"
 )
@@ -130,16 +131,21 @@ func validateMaxBytes(fl validator.FieldLevel) bool {
 
 // validateStrongPassword validates password complexity
 // Requirements:
-// - Minimum 12 characters
-// - At least 1 uppercase letter
-// - At least 1 lowercase letter
-// - At least 1 digit
-// - At least 1 special character
+//   - Minimum 12 characters (UTF-8 code points — this is the unit users think
+//     in; bcrypt's real ceiling is 72 bytes, enforced separately by maxbytes)
+//   - At least 1 uppercase letter
+//   - At least 1 lowercase letter
+//   - At least 1 digit
+//   - At least 1 special character
 func validateStrongPassword(fl validator.FieldLevel) bool {
 	password := fl.Field().String()
 
-	// Minimum 12 characters
-	if len(password) < 12 {
+	// Minimum 12 characters. utf8.RuneCountInString, not len: len counts UTF-8
+	// bytes, so a password of e.g. 10 accented characters (20 bytes) would pass
+	// a byte check but not the user-visible "12 characters" rule — and the one
+	// true authority a user sees (the frontend) counts code points via
+	// Array.from. Counting runes here keeps the two halves in agreement.
+	if utf8.RuneCountInString(password) < 12 {
 		return false
 	}
 
