@@ -915,7 +915,8 @@ async function handleUpdate() {
 
 async function handleSaveNotifications(config: NotifyConfig) {
   try {
-    // SMTP capability controls delivery and the UI, not the owner's saved choice.
+    // Only a confirmed 'unavailable' SMTP probe forces email.enabled=false; an
+    // errored or unfinished probe preserves the saved value.
     await updateNotifyConfig(calendarId, applySmtpProbeToConfig(config, smtpProbe.value));
     toastStore.success(t('calendar.settingsSaved'));
   } catch (error: any) {
