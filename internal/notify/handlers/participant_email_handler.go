@@ -83,6 +83,7 @@ func NewParticipantEmailHandler(
 //	@Param			request	body		models.AddParticipantEmailRequest	true	"Email address"
 //	@Success		200		{object}	models.ParticipantEmailResponse
 //	@Failure		400		{object}	httputil.ErrorResponse
+//	@Failure		403		{object}	httputil.ErrorResponse
 //	@Failure		404		{object}	httputil.ErrorResponse
 //	@Failure		500		{object}	httputil.ErrorResponse
 //	@Router			/api/v1/calendars/{token}/participants/{pid}/email [post]
@@ -224,6 +225,7 @@ func (h *ParticipantEmailHandler) VerifyEmail(w http.ResponseWriter, r *http.Req
 //	@Param			pid		path		string	true	"Participant ID"
 //	@Success		200		{object}	models.ParticipantEmailMessageResponse
 //	@Failure		400		{object}	httputil.ErrorResponse
+//	@Failure		403		{object}	httputil.ErrorResponse
 //	@Failure		404		{object}	httputil.ErrorResponse
 //	@Failure		500		{object}	httputil.ErrorResponse
 //	@Router			/api/v1/calendars/{token}/participants/{pid}/resend-verification [post]
