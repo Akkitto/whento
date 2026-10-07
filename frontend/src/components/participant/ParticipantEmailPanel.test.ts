@@ -89,6 +89,7 @@ describe('ParticipantEmailPanel capability', () => {
     expect(wrapper.find('form').exists()).toBe(true);
     await wrapper.setProps({ smtpProbe: 'unavailable' });
     expect(wrapper.find('form').exists()).toBe(false);
+    expect(wrapper.text()).toContain('ada@example.test');
     expect(addParticipantEmail).not.toHaveBeenCalled();
     wrapper.unmount();
   });

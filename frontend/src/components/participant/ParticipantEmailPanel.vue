@@ -64,7 +64,7 @@
 
     <!-- Email pending verification -->
     <div v-else-if="email && !emailVerified" class="space-y-3">
-      <div v-if="!changingEmail" class="space-y-3">
+      <div v-if="!changingEmail || !canSend" class="space-y-3">
         <div class="rounded-lg bg-orange-50 p-4 dark:bg-orange-900/20">
           <div class="flex">
             <svg
@@ -112,7 +112,7 @@
 
     <!-- Email verified -->
     <div v-else-if="email" class="space-y-3">
-      <div v-if="!changingEmail" class="space-y-3">
+      <div v-if="!changingEmail || !canSend" class="space-y-3">
         <div class="rounded-lg bg-success-50 p-4 dark:bg-success-900/20">
           <div class="flex">
             <svg
