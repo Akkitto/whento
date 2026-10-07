@@ -170,8 +170,9 @@
         <!-- Notifications -->
         <NotificationSettings
           v-model="notifyConfig"
-          :smtp-configured="smtpConfigured"
+          :smtp-probe="smtpProbe"
           :show-save-button="false"
+          @retry-smtp-probe="probeSmtp"
         />
 
         <!-- Warning Message - No Participants -->
@@ -274,6 +275,7 @@ import {
   prepareWeekdayTimes,
 } from '@/utils/calendar/weekdayTimes';
 import { getDefaultNotifyConfig, updateNotifyConfig, type NotifyConfig } from '@/api/notify';
+import { applySmtpProbeToConfig, useSmtpProbe } from '@/utils/smtpProbe';
 import { translateErrorMessage } from '@/utils/errorTranslator';
 
 const router = useRouter();
@@ -304,13 +306,19 @@ const form = reactive({
 
 // Notification config state
 const notifyConfig = ref<NotifyConfig>(getDefaultNotifyConfig());
-const smtpConfigured = ref(true); // TODO: Fetch from backend config
+// Email notification options depend on the instance actually having SMTP
+// configured; default to hidden until the backend confirms otherwise.
+const { state: smtpProbe, probe: probeSmtp } = useSmtpProbe();
 
 const participants = ref<string[]>([]);
 
 // Automatically add the connected user as a default participant
 // and initialize timezone with the user's timezone
 onMounted(() => {
+  // Email options follow the instance's actual SMTP configuration via the
+  // existing /auth/magic-link/available capability endpoint. On failure the
+  // probe goes to 'error' (retryable) and never rewrites email.enabled.
+  probeSmtp();
   if (authStore.user?.display_name) {
     participants.value.push(authStore.user.display_name);
   }
@@ -430,7 +438,11 @@ async function handleSubmit() {
     // freshly created calendar.
     if (notifyConfig.value.enabled) {
       try {
-        await updateNotifyConfig(calendar.id, notifyConfig.value);
+        // SMTP capability gates delivery, never the owner's saved preference.
+        await updateNotifyConfig(
+          calendar.id,
+          applySmtpProbeToConfig(notifyConfig.value, smtpProbe.value)
+        );
       } catch {
         // The calendar itself exists; only its notification settings did not take.
         // Say so, and still send the user to the settings page to retry there,

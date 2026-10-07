@@ -54,6 +54,13 @@ line per release rather than listed individually.
 - Durable, migration-backed pending-MFA nonce consumption and refresh-session
   families with per-user advisory locking, so concurrent refresh rotations and
   a logout cannot lose each other.
+- A reminder scheduler (`internal/notify/service`) wired into `cmd` that issues,
+  claims and delivers persisted reminder jobs, re-arms canceled deliveries
+  within the catch-up window once availability/config return, and renews its
+  claim lease immediately before the external send. The operator tunables are
+  exposed as `REMINDER_HOURS_BEFORE`, `REMINDER_INTERVAL`,
+  `REMINDER_CATCH_UP_WINDOW`, `REMINDER_MAX_ATTEMPTS` and
+  `REMINDER_RETRY_BACKOFF`.
 
 ### Changed
 
@@ -132,6 +139,37 @@ line per release rather than listed individually.
   `BOOTSTRAP_KEY_FILE` as well as `BOOTSTRAP_KEY` as the key's source.
 
 ---
+- **Reminder delivery is a durable, fenced queue.** Reminders are persisted in
+  a `reminder_jobs` table (migration `020`) and delivered by a scheduler loop:
+  each job is claimed atomically under a per-acquisition UUID claim token and a
+  lease (`FOR UPDATE SKIP LOCKED`), so only one worker owns an unexpired claim.
+  Every queue-state transition is fenced by its token: a late worker's failure report on a job
+  somebody else already sent is a recognizable no-op, and a `sent` row can never
+  be rewritten. Delivery is retried with exponential backoff and permanently
+  fails after `max_attempts`. External delivery remains at least once: a crash
+  after a provider accepts a send but before completion is recorded can cause a
+  retry; exactly-once delivery is not promised.
+- **Reminder deadlines are calendar-local.** The scheduler enumerates candidate
+  event dates in the calendar's own IANA timezone (never a fixed UTC window), so
+  a calendar east of UTC does not lose the day its event lands on, and DST
+  shifts cannot move a scheduled instant onto the wrong date.
+- **Transient errors never cancel an event.** A failed count/availability query
+  while verifying a claimed job retries that job with backoff; only an
+  authoritatively confirmed non-qualifying event cancels its pending
+  deliveries. No longer does one bad read silently kill every reminder for an
+  event.
+- **Email is gated on real SMTP, re-read at delivery.** With no mailer
+  configured the scheduler enqueues no email jobs (chat channels are
+  unaffected), and a job whose SMTP vanished before delivery is suppressed
+  rearmably instead of burning its attempt budget. Participant email requires
+  the calendar's full consent configuration *and* SMTP, verified again at
+  delivery time, and the participant-email endpoints refuse when the email
+  channel is off, participant delivery is off, or SMTP is absent.
+- **The frontend SMTP probe preserves saved owner intent.** Instead of a boolean
+  that defaults to “available”, the probe is `unknown | available | unavailable
+  | error`: a failed probe shows a retryable warning. Neither a failed probe nor
+  unavailable SMTP rewrites saved `email.enabled`; only an explicit owner edit
+  changes that preference. Capability still gates delivery and new enablement.
 
 ## [v2.0.0] — 2026-08-18
 
