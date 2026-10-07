@@ -8,11 +8,14 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
-import { flushPromises } from '@vue/test-utils';
+import { enableAutoUnmount, flushPromises } from '@vue/test-utils';
 import { nextTick } from 'vue';
+import { bumpAccountGeneration } from '@/accountFence';
 import type { CalendarWithParticipants, User } from '@/types';
 
 import { mountWithI18n } from '@/test/harness';
+
+enableAutoUnmount(afterEach);
 
 const routerPush = vi.fn();
 
@@ -140,6 +143,19 @@ beforeEach(() => {
 });
 
 describe('Dashboard.vue — my calendars', () => {
+  it('reloads each account-scoped resource exactly once after a replacement', async () => {
+    const wrapper = await mountDashboard([calendar('a', 'Alpha')]);
+    calendarsApi.getAll.mockClear();
+    unifiedFeedApi.getConfig.mockClear();
+
+    bumpAccountGeneration();
+    await flushPromises();
+
+    expect(calendarsApi.getAll).toHaveBeenCalledTimes(1);
+    expect(unifiedFeedApi.getConfig).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
   it('renders calendars alphabetically ascending by default', async () => {
     const wrapper = await mountDashboard([
       calendar('z', 'Zebra'),

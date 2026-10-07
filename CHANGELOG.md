@@ -96,6 +96,29 @@ line per release rather than listed individually.
   the calendar link when no move control remains; a screen reader is told the
   new position through a polite live region. Buttons have localized accessible
   names and proper disabled states, and pin state uses `aria-pressed`.
+- **Coordinated cross-tab sessions without reload loops.** Sessions are now
+  identified by the server's stable family/session id, a separate in-memory
+  refresh token with a restartable timer, and a local account generation that
+  fences stale async work. A same-family token rotation simply replaces the
+  token and restarts the timer — it is not treated as a new login, so other
+  tabs no longer reload or re-fetch `/me`, and merely opening a tab no longer
+  advances any epoch. A genuinely different finalized family (or an explicit
+  logout) bumps the generation, clears account-scoped calendar/feed/owner
+  state, and confirms identity through `/auth/me` before user state commits.
+- **Serialized cookie-changing auth, without a home-grown protocol.** Refresh,
+  login, bootstrap, register, MFA finalization, magic-link verify, password
+  reset and logout all serialize on one same-origin Web Lock (local
+  serialization when Web Locks is absent, with the documented cross-tab
+  Set-Cookie ordering caveat). Only one refresh runs at a time per client via a
+  promise gate; a queued request's account generation is checked before send
+  and before the response is installed, so an old account's PATCH is never
+  replayed under a new token, and a rejected login/register never signs out a
+  valid session. BroadcastChannel may carry live tokens between same-origin
+  tabs; no token is ever persisted to localStorage/sessionStorage — only a
+  non-secret logged-out-family marker, a presence flag and validated
+  session-family metadata. Messages are validated (family, token presence and
+  expiry, sender) and never echoed, and a client can be disposed (timers,
+  channel, listeners) for tests and HMR.
 
 ### Changed
 

@@ -251,6 +251,7 @@ import { dayOfWeekISO, formatDateISO, parseISODate } from '@/utils/date/isoDate'
 import { useParticipantCalendar } from '@/composables/calendar/useParticipantCalendar';
 import { useParticipantDisplaySettings } from '@/composables/calendar/useParticipantDisplaySettings';
 import { useCalendarStream } from '@/composables/calendar/useCalendarStream';
+import { useAccountScopedReload } from '@/composables/useAccountScopedReload';
 import { translateErrorMessage } from '@/utils/errorTranslator';
 import { useSmtpProbe } from '@/utils/smtpProbe';
 import type {
@@ -647,6 +648,13 @@ async function loadOwnedCalendars() {
     // Ignored on purpose: the edit link simply stays hidden.
   }
 }
+
+// A remote account replacement clears the previous owner's cached list via the store;
+// when the new identity confirms, reload it so an owner of this calendar sees their
+// edit link again. Public payload is untouched.
+useAccountScopedReload(() => {
+  void loadOwnedCalendars();
+});
 
 async function loadCalendar() {
   loading.value = true;

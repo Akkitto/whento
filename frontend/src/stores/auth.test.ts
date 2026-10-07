@@ -29,12 +29,14 @@ const apiClient = {
   clearToken: vi.fn(),
   hasSession: vi.fn(() => false),
   signOut: vi.fn(),
+  logoutThroughLock: vi.fn((run: () => unknown) => run()),
 };
 
 vi.mock('@/api/auth', () => ({ authApi }));
 vi.mock('@/api/client', () => ({ apiClient }));
 
 const { useAuthStore } = await import('./auth');
+const { useCalendarStore } = await import('./calendar');
 
 const USER: User = {
   id: 'u-1',
@@ -69,12 +71,10 @@ function freshStore() {
 }
 
 beforeEach(() => {
-  // resetAllMocks (not clearAllMocks): a stale implementation left by one test
-  // (e.g. a resolved value set on register) must never survive into the next —
-  // relying on test ordering for a mock to be populated is exactly the defect
-  // this suite used to hide. Every test below sets the implementations it needs.
-  vi.resetAllMocks();
+  vi.clearAllMocks();
   localStorage.clear();
+  // clearAllMocks clears calls, not implementations: without this a test that
+  // opts into a session leaves every later test signed in.
   apiClient.hasSession.mockReturnValue(false);
   authApi.getAuthStatus.mockResolvedValue({
     needs_bootstrap: false,
@@ -116,7 +116,7 @@ describe('auth store', () => {
       await store.login({ email: 'ada@example.com', password: 'pw' });
 
       expect(store.user).toEqual(USER);
-      expect(apiClient.setToken).toHaveBeenCalledWith('tok', undefined);
+      expect(apiClient.setToken).toHaveBeenCalledWith('tok', undefined, undefined);
     });
 
     it('passes the token lifetime on, so the client can refresh ahead of it', async () => {
@@ -125,7 +125,7 @@ describe('auth store', () => {
 
       await store.login({ email: 'ada@example.com', password: 'pw' });
 
-      expect(apiClient.setToken).toHaveBeenCalledWith('tok', 900);
+      expect(apiClient.setToken).toHaveBeenCalledWith('tok', 900, undefined);
     });
 
     it('does not start a session when a second factor is required', async () => {
@@ -183,7 +183,7 @@ describe('auth store', () => {
       await store.register({ email: 'ada@example.com', password: 'pw', display_name: 'Ada' });
 
       expect(store.user).toEqual(USER);
-      expect(apiClient.setToken).toHaveBeenCalledWith('tok', undefined);
+      expect(apiClient.setToken).toHaveBeenCalledWith('tok', undefined, undefined);
     });
 
     it('clears bootstrapRequired after a successful first registration', async () => {
@@ -191,11 +191,8 @@ describe('auth store', () => {
         needs_bootstrap: true,
         registration_enabled: true,
       });
-      // The action under test is register — the mock must be configured on
-      // register, not on bootstrap (a previous draft configured the wrong mock
-      // and only passed because a stale implementation had leaked in from test
-      // ordering).
       authApi.register.mockResolvedValue(authResponse());
+      authApi.bootstrap.mockResolvedValue(authResponse());
       const store = freshStore();
       await store.initializeAuth();
 
@@ -203,9 +200,11 @@ describe('auth store', () => {
       // to /bootstrap.
       expect(store.bootstrapRequired).toBe(true);
 
-      // Registration succeeds only on a bootstrapped instance server-side; this
-      // test pins the local-UI correction, which must still flip the flag on a
-      // success the server accepted.
+      // The first account is then created through open registration instead. The
+      // instance now has a user, so the client must stop treating bootstrap as
+      // needed — otherwise the guard keeps bouncing the new visitor to a page
+      // whose POST would 409. The server is the authority and never reads this
+      // flag, so this can only correct the UI, never close a door.
       await store.register({ email: 'ada@example.com', password: 'pw', display_name: 'Ada' });
 
       expect(store.bootstrapRequired).toBe(false);
@@ -331,6 +330,27 @@ describe('auth store', () => {
       expect(store.error).toBeNull();
       expect(store.loading).toBe(false);
     });
+
+    it('clears account-scoped calendar state so the next account cannot inherit it', async () => {
+      authApi.logout.mockResolvedValue(undefined);
+      const store = freshStore();
+      store.user = USER;
+
+      const calendarStore = useCalendarStore();
+      // Account A's dashboard had populated its own calendars (with full participant
+      // ids) on this browser; the store now tracks which account that data belongs to.
+      calendarStore.calendars = [
+        { id: 'c-1', name: 'A-owned', participants: [{ id: 'p-1', name: 'Ada' }] } as never,
+      ];
+      calendarStore.calendarsForUser = USER.id;
+
+      await store.logout();
+
+      // A public calendar link is a capability: the next account on this browser must
+      // not be able to reuse A's participant ids as ownership evidence.
+      expect(calendarStore.calendars).toEqual([]);
+      expect(calendarStore.calendarsForUser).toBeNull();
+    });
   });
 
   describe('fetchUser', () => {
@@ -345,6 +365,50 @@ describe('auth store', () => {
       // Local only. A refused /auth/me is not a decision to sign out, and must not
       // reach the other tabs on this browser.
       expect(apiClient.signOut).not.toHaveBeenCalled();
+    });
+
+    it('does not overwrite a replacement identity with an old /auth/me answer', async () => {
+      // Audit 28 F2: an *unqualified* /auth/me (no epoch supplied) must still be
+      // fenced against a replacement that lands while it is in flight. Hold the old
+      // request, sign in as B through the real login action, then release A's stale
+      // payload — it must not overwrite B.
+      const old = deferred<User>();
+      authApi.getMe.mockReturnValueOnce(old.promise);
+      const store = freshStore();
+
+      const pending = store.fetchUser();
+      authApi.login.mockResolvedValue(
+        authResponse({ user: { ...USER, id: 'u-b', email: 'b@example.test', display_name: 'B' } })
+      );
+      await store.login({ email: 'b@example.test', password: 'pw' });
+      expect(store.user?.id).toBe('u-b');
+
+      old.resolve(USER);
+      await pending;
+
+      expect(store.user?.id).toBe('u-b');
+    });
+
+    it('does not clear a replacement token when an old /auth/me fails', async () => {
+      // Audit 28 F2 failure side: a stale error for a superseded restore must not
+      // clear the replacement session's token. The login advanced the fence, so the
+      // old failure is discarded.
+      const old = deferred<User>();
+      authApi.getMe.mockReturnValueOnce(old.promise);
+      const store = freshStore();
+
+      const pending = store.fetchUser().catch(() => undefined);
+      authApi.login.mockResolvedValue(
+        authResponse({ user: { ...USER, id: 'u-b', email: 'b@example.test', display_name: 'B' } })
+      );
+      await store.login({ email: 'b@example.test', password: 'pw' });
+      apiClient.clearToken.mockClear();
+
+      old.reject(new Error('old /auth/me failed'));
+      await pending;
+
+      expect(store.user?.id).toBe('u-b');
+      expect(apiClient.clearToken).not.toHaveBeenCalled();
     });
   });
 
@@ -367,6 +431,106 @@ describe('auth store', () => {
       expect(store.error).toBe(i18n.global.t('auth.updateProfileError'));
     });
 
+    it('does not write a late profile update into the account that superseded it', async () => {
+      const store = freshStore();
+      store.user = USER;
+
+      const profileUpdate = deferred<User>();
+      const updatedA = { ...USER, display_name: 'Ada L.' };
+      authApi.updateProfile.mockReturnValue(profileUpdate.promise);
+      const pending = store.updateProfile({ display_name: 'Ada L.' });
+
+      // A signs out and B signs in while A's profile save is still in flight.
+      store.user = null;
+      const userB = { ...USER, id: 'u-9', email: 'b@example.test', display_name: 'Bee' };
+      store.user = userB;
+
+      profileUpdate.resolve(updatedA);
+      await pending;
+
+      // A's values never reached B's user, and the caller is told nothing was committed.
+      await expect(pending).resolves.toBeNull();
+      expect(store.user).toEqual(userB);
+      expect(store.user?.display_name).toBe('Bee');
+    });
+
+    it('does not let a late save from an old session overwrite a replacement session for the same user', async () => {
+      // The user-id fence alone cannot tell "same account, same session" from "same
+      // account, replacement session": a logout followed by a fresh login to the same
+      // account must still fence off the old session's in-flight continuations.
+      const store = freshStore();
+      authApi.login.mockResolvedValue(authResponse());
+      await store.login({ email: 'ada@example.com', password: 'pw' });
+      expect(store.user?.id).toBe(USER.id);
+
+      const profileUpdate = deferred<User>();
+      authApi.updateProfile.mockReturnValue(profileUpdate.promise);
+      const pending = store.updateProfile({ display_name: 'Ada L.' });
+
+      // A logs out, then signs straight back in as the *same* account.
+      authApi.logout.mockResolvedValue(undefined);
+      await store.logout();
+      expect(store.user).toBeNull();
+
+      authApi.login.mockResolvedValue(
+        authResponse({ user: { ...USER, display_name: 'Ada (fresh)' } })
+      );
+      await store.login({ email: 'ada@example.com', password: 'pw' });
+      expect(store.user?.display_name).toBe('Ada (fresh)');
+
+      // The old session's save lands after the replacement session is already in use.
+      profileUpdate.resolve({ ...USER, display_name: 'Ada L.' });
+      const result = await pending;
+
+      // Nothing from the dead session was committed; the replacement survives.
+      expect(result).toBeNull();
+      expect(store.user?.id).toBe(USER.id);
+      expect(store.user?.display_name).toBe('Ada (fresh)');
+    });
+
+    it('does not transmit a queued A-save after B signed in (cross-account queue)', async () => {
+      // The settings queue serialises the two forms behind a shared chain. A write
+      // queued behind a still-in-flight one must recheck the account fence *before* it
+      // is sent: if A's second save ran after B logged in, it would carry A's fields
+      // with B's token on the wire — the post-response fence could only stop the Pinia
+      // commit, never the server mutation.
+      const store = freshStore();
+      authApi.login.mockResolvedValue(authResponse());
+      await store.login({ email: 'ada@example.com', password: 'pw' });
+      expect(store.user?.id).toBe(USER.id);
+
+      // Save 1 is in flight; save 2 queued behind it for the same account.
+      const firstSave = deferred<User>();
+      authApi.updateProfile.mockReturnValueOnce(firstSave.promise);
+      const displaySave = store.updateProfile({ display_name: 'Ada L.' });
+      const localeSave = store.updateProfile({ locale: 'en' });
+      await Promise.resolve();
+      expect(authApi.updateProfile).toHaveBeenCalledTimes(1);
+
+      // A logs out, and B signs in while save 1 is still on the wire.
+      authApi.logout.mockResolvedValue(undefined);
+      await store.logout();
+      authApi.login.mockResolvedValue(
+        authResponse({
+          user: { ...USER, id: 'u-9', email: 'b@example.test', display_name: 'Bee' },
+        })
+      );
+      await store.login({ email: 'b@example.test', password: 'pw' });
+
+      // Save 1 settles; save 2's queued turn comes up.
+      firstSave.resolve({ ...USER, display_name: 'Ada L.', locale: 'en', id: USER.id });
+      const localeResult = await localeSave;
+      const displayResult = await displaySave;
+
+      // Save 2 was never sent — the wire only ever saw save 1.
+      expect(authApi.updateProfile).toHaveBeenCalledTimes(1);
+      expect(localeResult).toBeNull();
+      expect(displayResult).toBeNull();
+      // B's account is untouched.
+      expect(store.user?.id).toBe('u-9');
+      expect(store.user?.display_name).toBe('Bee');
+    });
+
     it('translates a password change failure', async () => {
       authApi.updatePassword.mockRejectedValue({ code: 'UNAUTHORIZED' });
       const store = freshStore();
@@ -382,7 +546,7 @@ describe('auth store', () => {
       await store.resetPassword('reset-token', 'new-password');
 
       expect(store.user).toEqual(USER);
-      expect(apiClient.setToken).toHaveBeenCalledWith('fresh', undefined);
+      expect(apiClient.setToken).toHaveBeenCalledWith('fresh', undefined, undefined);
     });
 
     it('does not sign the user in when the reset requires MFA', async () => {
@@ -411,7 +575,7 @@ describe('auth store', () => {
   describe('setTokens', () => {
     it('hands the token straight to the client', () => {
       freshStore().setTokens('mfa-issued');
-      expect(apiClient.setToken).toHaveBeenCalledWith('mfa-issued', undefined);
+      expect(apiClient.setToken).toHaveBeenCalledWith('mfa-issued', undefined, undefined);
     });
   });
 
@@ -475,6 +639,35 @@ describe('auth store', () => {
       expect(store.isAuthenticated).toBe(false);
       expect(store.error).toBeNull();
       expect(apiClient.clearToken).toHaveBeenCalled();
+    });
+
+    it('does not clear a replacement token when a stale startup restore fails', async () => {
+      // Audit 28 F2 outer path: initializeAuth's own cleanup must also be fenced. A
+      // cold-start restore whose /auth/me fails after a replacement session was
+      // established must not clear the replacement's token.
+      apiClient.hasSession.mockReturnValue(true);
+      const gate = deferred<User>();
+      authApi.getMe.mockReturnValueOnce(gate.promise);
+      const store = freshStore();
+
+      const pending = store.initializeAuth();
+      // Let the cold restore actually reach /auth/me (and capture its boundary)
+      // before B signs in.
+      await vi.waitFor(() => expect(authApi.getMe).toHaveBeenCalled());
+
+      // B signs in while the cold restore is still in flight, advancing the fence.
+      authApi.login.mockResolvedValue(
+        authResponse({ user: { ...USER, id: 'u-b', email: 'b@example.test', display_name: 'B' } })
+      );
+      await store.login({ email: 'b@example.test', password: 'pw' });
+      expect(store.user?.id).toBe('u-b');
+      apiClient.clearToken.mockClear();
+
+      gate.reject(new Error('cold restore failed'));
+      await expect(pending).resolves.toBeUndefined();
+
+      expect(store.user?.id).toBe('u-b');
+      expect(apiClient.clearToken).not.toHaveBeenCalled();
     });
 
     it('runs once however many callers ask', async () => {

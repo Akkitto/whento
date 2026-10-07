@@ -598,6 +598,7 @@ import { useI18n } from 'vue-i18n';
 import { useCalendarStore } from '@/stores/calendar';
 import { useToastStore } from '@/stores/toast';
 import { confirm } from '@/composables/useConfirm';
+import { useAccountScopedReload } from '@/composables/useAccountScopedReload';
 import CollapsibleSection from '@/components/CollapsibleSection.vue';
 import NotificationSettings from '@/components/NotificationSettings.vue';
 import CalendarInfoFields from '@/components/calendar/CalendarInfoFields.vue';
@@ -625,6 +626,13 @@ const calendarStore = useCalendarStore();
 const toastStore = useToastStore();
 
 const calendarId = route.params.id as string;
+
+// A remote account replacement (or a refresh that discovered a different server
+// family) advances the local account generation, not a document reload. Reload this
+// calendar's own data instead; the owner is the same route, the data is account-scoped.
+useAccountScopedReload(() => {
+  void loadCalendar();
+});
 
 const loading = ref(true);
 const updating = ref(false);
@@ -907,8 +915,7 @@ async function handleUpdate() {
 
 async function handleSaveNotifications(config: NotifyConfig) {
   try {
-    // Only a confirmed 'unavailable' SMTP probe forces email.enabled=false; an
-    // errored or unfinished probe preserves the saved value.
+    // SMTP capability controls delivery and the UI, not the owner's saved choice.
     await updateNotifyConfig(calendarId, applySmtpProbeToConfig(config, smtpProbe.value));
     toastStore.success(t('calendar.settingsSaved'));
   } catch (error: any) {
