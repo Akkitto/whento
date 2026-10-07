@@ -76,11 +76,10 @@ type MagicLinkAvailableResponse struct {
 // registration button when RegistrationEnabled is false, and an operator — or
 // Ansible — checks NeedsBootstrap before attempting POST /api/v1/auth/bootstrap.
 type BootstrapStatusResponse struct {
-	// NeedsBootstrap is true while the instance has no users yet, which is the
-	// only time the bootstrap endpoint accepts a request.
+	// NeedsBootstrap is true until the durable first-user slot is claimed.
+	// Deleting accounts later never reopens it.
 	NeedsBootstrap bool `json:"needs_bootstrap"`
-	// RegistrationEnabled mirrors the server's ALLOWED_REGISTER setting. Open
-	// registration and the bootstrap flow are both valid ways to create the
-	// first account; this tells the client which one the UI may offer.
+	// RegistrationEnabled is ALLOWED_REGISTER && !NeedsBootstrap. Ordinary
+	// registration is available only after operator bootstrap has completed.
 	RegistrationEnabled bool `json:"registration_enabled"`
 }

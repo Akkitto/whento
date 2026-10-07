@@ -17,8 +17,8 @@ import (
 )
 
 const (
-	// productionEnv is the APP_ENV value that turns on the stricter checks.
-	productionEnv = "production"
+	// EnvProduction is the APP_ENV value that turns on the stricter checks.
+	EnvProduction = "production"
 
 	// bcrypt refuses to work below 4 and the cost is stored in the hash, so a
 	// value above 15 is not just slow once: every login pays it again. 15 is
@@ -256,9 +256,10 @@ func validateCORSOrigins(origins []string) error {
 //
 // The floor is environment-dependent: a production boot key must survive
 // real-world brute force on a rate-limited endpoint for the life of the
-// instance's first-user window, so it needs 32 Unicode code points of entropy;
-// development accepts 16 so test and demo environments (docker-compose.dev, the
-// suite itself) can pin short memorable keys. The 256-character ceiling is the
+// instance's first-user window, so require at least 32 Unicode code points.
+// Length is not entropy: production operators should generate a random key.
+// Development accepts 16 for explicitly configured test and demo keys; the
+// development Compose file itself does not pin a key. The 256-character ceiling is the
 // same in both, so a shell variable or _FILE secret that accidentally swallows
 // the rest of a wrapped line still fails loudly rather than validating as a
 // truncated key.
@@ -266,7 +267,7 @@ func (c *Config) validateBootstrap() error {
 	const maxBootKeyLen = 256
 
 	minBootKeyLen := 16
-	if strings.EqualFold(c.AppEnv, productionEnv) {
+	if strings.EqualFold(c.AppEnv, EnvProduction) {
 		minBootKeyLen = 32
 	}
 
@@ -286,7 +287,7 @@ func (c *Config) validateBootstrap() error {
 // APP_ENV says this is a real deployment. Kept deliberately short: a rule that
 // is merely opinionated turns an upgrade into an outage at restart.
 func (c *Config) validateProductionCoherence() error {
-	if !strings.EqualFold(c.AppEnv, productionEnv) {
+	if !strings.EqualFold(c.AppEnv, EnvProduction) {
 		return nil
 	}
 	if c.BcryptCost < minProductionBcryptCost {
@@ -317,7 +318,7 @@ func (c *Config) Warnings() []string {
 	// every self-hosted instance that never configured a mail server would
 	// have refused to boot on the next `docker compose pull`. Breaking a
 	// running deployment is worse than the half-working state it is in.
-	if strings.EqualFold(c.AppEnv, productionEnv) && c.Email.VerificationEnabled && c.Email.SMTPHost == "" {
+	if strings.EqualFold(c.AppEnv, EnvProduction) && c.Email.VerificationEnabled && c.Email.SMTPHost == "" {
 		warnings = append(warnings, "EMAIL_VERIFICATION_ENABLED=true but SMTP_HOST is empty and APP_ENV=production: "+
 			"no verification mail can be sent, so no new account can confirm its address, "+
 			"and an unverified account is refused when it tries to create a calendar. "+

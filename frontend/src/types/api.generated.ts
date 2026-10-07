@@ -406,6 +406,15 @@ export interface paths {
             'application/json': components['schemas']['httputil.ErrorResponse'];
           };
         };
+        /** @description Bootstrap or session creation failed */
+        500: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['httputil.ErrorResponse'];
+          };
+        };
       };
     };
     delete?: never;
@@ -1509,6 +1518,24 @@ export interface paths {
           };
           content: {
             'application/json': components['schemas']['models.BootstrapStatusResponse'];
+          };
+        };
+        /** @description Rate limit exceeded */
+        429: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['httputil.ErrorResponse'];
+          };
+        };
+        /** @description Bootstrap state temporarily unavailable */
+        503: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['httputil.ErrorResponse'];
           };
         };
       };
@@ -4917,14 +4944,13 @@ export interface components {
     };
     'models.BootstrapStatusResponse': {
       /**
-       * @description NeedsBootstrap is true while the instance has no users yet, which is the
-       *     only time the bootstrap endpoint accepts a request.
+       * @description NeedsBootstrap is true until the durable first-user slot is claimed.
+       *     Deleting accounts later never reopens it.
        */
       needs_bootstrap?: boolean;
       /**
-       * @description RegistrationEnabled mirrors the server's ALLOWED_REGISTER setting. Open
-       *     registration and the bootstrap flow are both valid ways to create the
-       *     first account; this tells the client which one the UI may offer.
+       * @description RegistrationEnabled is ALLOWED_REGISTER && !NeedsBootstrap. Ordinary
+       *     registration is available only after operator bootstrap has completed.
        */
       registration_enabled?: boolean;
     };

@@ -470,16 +470,9 @@ func (r *UserRepository) HasUsers(ctx context.Context) (bool, error) {
 }
 
 // CreateFirstUser is the bootstrap slot: it creates the first user atomically
-// with the emptiness check, under the first-user advisory lock, so two racing
-// requests — bootstrap or open registration — cannot both become the first (and
-// therefore admin) account.
-//
-// Register used to go through it too, before the open-registration bootstrap
-// path was closed: the emptiness check and the insert live in one transaction
-// under advisory lock 1, which is what makes "am I the first user?" a decision
-// that cannot be out-raced. This method is now the bootstrap flow's alone; it is
-// kept deliberately exclusive so the unsafe count-then-insert pattern it
-// replaces cannot quietly return.
+// with the durable marker under advisory lock 1. Only the operator-key
+// bootstrap flow calls it; ordinary registration cannot create the first user.
+// Competing replicas can claim exactly one first administrator.
 func (r *UserRepository) CreateFirstUser(ctx context.Context, user *models.User) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -494,12 +487,11 @@ func (r *UserRepository) CreateFirstUser(ctx context.Context, user *models.User)
 	}
 
 	// Is the first-user slot still open? The durable app_state marker is the
-	// monotonic authority; the users-table EXISTS covers instances whose
-	// schema predates 019_app_state (a shared test database that created users
-	// before the migration, for instance). Under advisory lock 1 neither answer
-	// can change mid-transaction, so the two agree on every migrated instance.
+	// monotonic authority; EXISTS also detects users inserted by a legacy binary
+	// after migration 019 during a rolling upgrade. The app_state table must
+	// already exist. The lock serialises bootstrap contenders, not legacy writers.
 	//
-	// EXISTS, not COUNT (*: this runs inside the advisory-locked first-user
+	// EXISTS, not COUNT(*): this runs inside the advisory-locked first-user
 	// transaction, so it must not cost a full scan of a table that grows with
 	// every sign-up.
 	var slotTaken bool
@@ -563,26 +555,19 @@ func (r *UserRepository) CreateFirstUser(ctx context.Context, user *models.User)
 // The read is self-healing. A rolling upgrade can leave a pre-019 binary serving
 // traffic against a database that has already run migration 019: that binary
 // creates users through the plain Create path, which predates the marker, so the
-// marker alone would disagree with the users table. We therefore reconcile: if
-// users exist but the marker is not set, the marker is corrected atomically in
-// the same statement, so the split-brain cannot persist (or reopen bootstrap).
+// marker alone would disagree with the users table. Normal reads are read-only;
+// only an unreconciled legacy account needs a write to permanently close the
+// slot. The upsert can never downgrade a marker another replica has set.
 func (r *UserRepository) FirstUserCreated(ctx context.Context) (bool, error) {
 	query := `
-		WITH reconcile AS (
-			UPDATE app_state
-			SET first_user_created = TRUE, updated_at = now()
-			WHERE id = 1 AND NOT first_user_created AND EXISTS (SELECT 1 FROM users)
-			RETURNING first_user_created
-		)
-		SELECT EXISTS (SELECT 1 FROM reconcile)
-		    OR EXISTS (SELECT 1 FROM app_state WHERE id = 1 AND first_user_created)
-		    OR EXISTS (SELECT 1 FROM users)`
+		SELECT COALESCE((SELECT first_user_created FROM app_state WHERE id = 1), FALSE),
+		       EXISTS (SELECT 1 FROM users)`
 
-	var created bool
-	err := r.pool.QueryRow(ctx, query).Scan(&created)
+	var created, hasUsers bool
+	err := r.pool.QueryRow(ctx, query).Scan(&created, &hasUsers)
 	if err != nil {
 		// A schema older than 019_app_state has no app_state table, so the
-		// reconcile CTE cannot run at all. Fall back to the users table so the
+		// marker read cannot run at all. Fall back to the users table so the
 		// question still has a sensible answer. Postgres reports the missing
 		// table as 42P01.
 		if dberr.HasCode(err, dberr.CodeUndefinedTable) {
@@ -591,7 +576,21 @@ func (r *UserRepository) FirstUserCreated(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("failed to read first-user marker: %w", err)
 	}
 
-	return created, nil
+	if created || !hasUsers {
+		return created, nil
+	}
+
+	// Observing a legacy user closes the slot even if that user is deleted
+	// before this upsert. A missing singleton is also repaired, not ignored.
+	if _, err := r.pool.Exec(ctx, `
+		INSERT INTO app_state (id, first_user_created, updated_at)
+		VALUES (1, TRUE, now())
+		ON CONFLICT (id) DO UPDATE SET first_user_created = TRUE, updated_at = now()
+		WHERE NOT app_state.first_user_created
+	`); err != nil {
+		return false, fmt.Errorf("failed to reconcile first-user marker: %w", err)
+	}
+	return true, nil
 }
 
 // ExistsByEmail checks if a user exists with the given email

@@ -58,17 +58,12 @@ const (
 
 // UserRepository defines the interface for user repository operations. It is
 // deliberately the slice of the repository AuthService actually calls — the
-// first-user bootstrap primitives (CreateFirstUser, FirstUserCreated) and the
+// first-user marker read (FirstUserCreated) and the
 // ordinary account reads/writes — and nothing else. In particular the old split
 // role-decision read (DetermineRoleAtomically) is gone so the unsafe
 // count-then-insert pattern it embodies cannot quietly return.
 type UserRepository interface {
 	Create(ctx context.Context, user *models.User) error
-	// CreateFirstUser inserts a user, refusing with ErrFirstUserExists when the
-	// table already has a row, atomically with the emptiness check. The
-	// bootstrap flow uses it so the "first user is the administrator" decision
-	// cannot race a concurrent bootstrap.
-	CreateFirstUser(ctx context.Context, user *models.User) error
 	// FirstUserCreated is the durable "has the instance ever been bootstrapped?"
 	// read (app_state.first_user_created, set transactionally by
 	// CreateFirstUser). Registration gates on it: a fresh instance refuses all
@@ -182,7 +177,7 @@ func (s *AuthService) Register(ctx context.Context, req *models.RegisterRequest)
 	// error.
 	created, err := s.userRepo.FirstUserCreated(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrRegistrationState, err)
+		return nil, fmt.Errorf("%w: %w", ErrRegistrationState, err)
 	}
 	if !created {
 		// The instance has no first user yet: registration is not a bootstrap

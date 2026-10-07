@@ -102,6 +102,18 @@ func TestBootstrapStatusReportsCapabilities(t *testing.T) {
 	}
 }
 
+func TestBootstrapStatusUnavailable(t *testing.T) {
+	h := newBootstrapHandler(&stubBootstrapFlow{err: errors.New("private database failure")})
+	rec := httptest.NewRecorder()
+	h.Status(rec, testutil.MakeRequest(http.MethodGet, "/api/v1/auth/status"))
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), `"code":"SERVICE_UNAVAILABLE"`) {
+		t.Fatalf("status = %d, body = %s; want 503 SERVICE_UNAVAILABLE", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "private database failure") {
+		t.Fatal("response leaked database error")
+	}
+}
+
 func TestBootstrapCreate(t *testing.T) {
 	t.Run("creates the first user and sets the refresh cookie", func(t *testing.T) {
 		svc := &stubBootstrapFlow{resp: bootstrapResponse()}

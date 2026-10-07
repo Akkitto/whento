@@ -570,6 +570,38 @@ func newSingleConnPool(t *testing.T, ctx context.Context) *pgxpool.Pool {
 	return p
 }
 
+func TestFirstUserCreatedNormalReadsAreReadOnly(t *testing.T) {
+	pool := dbtest.Pool(t)
+	ctx := dbtest.Context(t)
+	dbtest.LockSingletonAccounts(ctx, t, pool)
+	readOnlyPool := newSingleConnPool(t, ctx)
+	// MaxConns=1 keeps every repository call on the session made read-only.
+	if _, err := readOnlyPool.Exec(ctx, `SET default_transaction_read_only = on`); err != nil {
+		t.Fatal(err)
+	}
+	repo := repository.NewUserRepository(readOnlyPool)
+	for _, closed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("closed=%t", closed), func(t *testing.T) {
+			markerFixture(ctx, t, pool, closed)
+			if !closed {
+				var hasUsers bool
+				if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM users)`).Scan(&hasUsers); err != nil {
+					t.Fatal(err)
+				}
+				if hasUsers {
+					t.Skip("empty-state read requires an empty test database")
+				}
+			}
+			for i := 0; i < 2; i++ {
+				got, err := repo.FirstUserCreated(ctx)
+				if err != nil || got != closed {
+					t.Fatalf("read-only marker read = %t, %v; want %t", got, err, closed)
+				}
+			}
+		})
+	}
+}
+
 // TestCreateFirstUserConcurrent is the regression test for the first-user race:
 // two callers — two registrations, or a registration and a bootstrap — racing
 // from an empty table. Each goroutine drives its own single-connection pool (so

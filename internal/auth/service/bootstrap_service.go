@@ -27,8 +27,7 @@ import (
 
 var (
 	// ErrBootstrapUnavailable means the one-time slot is gone: the instance
-	// already has a user (whether through /bootstrap or through open
-	// registration), so there is no first administrator left to create.
+	// has already had its first user, even if every account was later deleted.
 	ErrBootstrapUnavailable = errors.New("the instance is already configured")
 	// ErrBootstrapKeyInvalid means the submitted boot key did not match. It is
 	// deliberately distinct from ErrBootstrapUnavailable so the status report —
@@ -43,8 +42,8 @@ var (
 const bootKeyBytes = 32
 
 // FirstUserStore is the slice of the user repository the bootstrap flow needs:
-// the durable "has a first user ever been created" read that answers "is this
-// instance still empty?" and the atomic insert that claims the one slot. The
+// the durable "has a first user ever been created?" read and the atomic insert
+// that claims the one slot. The
 // concrete *repository.UserRepository satisfies it.
 type FirstUserStore interface {
 	FirstUserCreated(ctx context.Context) (bool, error)
@@ -84,11 +83,12 @@ type BootstrapService struct {
 	// A short in-process TTL cache for the public status read. The status
 	// endpoint is unauthenticated and called on every cold page load (and by
 	// automation), so letting every request hit the pool would put an unbounded
-	// anonymous database query in front of the only setup route — the exact
-	// failure the removed per-IP limiter had caused from the other direction.
-	// needsBootstrap changes at most once per instance lifetime (empty → has a
-	// user), so a two-second cache costs nothing in freshness and absorbs the
-	// burst. Mutated under mu.
+	// anonymous database query in front of the only setup route. The route's
+	// rate limit and this cache provide complementary protection. Open status
+	// expires after two seconds; closed status is permanent. cacheMu protects
+	// only memory, never DB reads, password hashing or session issuance.
+	cacheMu              sync.Mutex
+	statusRefreshMu      sync.Mutex // coalesce concurrent cache misses, independently of mu
 	statusNeedsBootstrap bool
 	statusAt             time.Time
 	statusValid          bool
@@ -132,9 +132,8 @@ func (s *BootstrapService) registrationEnabled() bool { return s.cfg.AllowedRegi
 // says, so the frontend must not offer ordinary registration until the first
 // user exists.
 //
-// The underlying answer (has the instance any users?) is almost constant — it
-// flips once, from empty to not — so a short TTL cache answers page-load bursts
-// without handing an unbounded anonymous query to the database pool.
+// The durable first-user marker flips at most once. Cache the open answer
+// briefly and remember a closed answer permanently, including after deletion.
 func (s *BootstrapService) Status(ctx context.Context) (*models.BootstrapStatusResponse, error) {
 	needs, err := s.needsCached(ctx)
 	if err != nil {
@@ -148,16 +147,25 @@ func (s *BootstrapService) Status(ctx context.Context) (*models.BootstrapStatusR
 }
 
 // needsCached returns whether the instance still needs bootstrapping, serving
-// short bursts from memory. The boot-key mutex doubles as the cache lock.
+// short bursts from memory. It never waits for first-user creation's mutex.
 func (s *BootstrapService) needsCached(ctx context.Context) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.statusValid && time.Since(s.statusAt) < statusCacheTTL {
-		return s.statusNeedsBootstrap, nil
+	if needs, valid := s.cachedNeeds(); valid {
+		return needs, nil
 	}
 
+	s.statusRefreshMu.Lock()
+	defer s.statusRefreshMu.Unlock()
+	if needs, valid := s.cachedNeeds(); valid {
+		return needs, nil
+	}
 	needs, err := s.needs(ctx)
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	// Creation or another observation may have closed the slot while this
+	// query was in flight. An older open answer (or error) cannot reopen it.
+	if s.statusValid && !s.statusNeedsBootstrap {
+		return false, nil
+	}
 	if err != nil {
 		return false, err
 	}
@@ -165,6 +173,13 @@ func (s *BootstrapService) needsCached(ctx context.Context) (bool, error) {
 	s.statusAt = time.Now()
 	s.statusValid = true
 	return needs, nil
+}
+
+func (s *BootstrapService) cachedNeeds() (bool, bool) {
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	valid := s.statusValid && (!s.statusNeedsBootstrap || time.Since(s.statusAt) < statusCacheTTL)
+	return s.statusNeedsBootstrap, valid
 }
 
 // needs reports whether the instance still has to be bootstrapped. It reads the
@@ -242,11 +257,13 @@ func (s *BootstrapService) CreateFirstUser(ctx context.Context, req *models.Boot
 	// code points. Rejecting a too-short submitted key here keeps the two routes
 	// — config validation and the HTTP endpoint — in agreement, so a too-short
 	// key cannot be a "valid" config value that every request then rejects.
-	if strings.EqualFold(s.cfg.AppEnv, "production") && utf8.RuneCountInString(req.BootKey) < 32 {
+	if strings.EqualFold(s.cfg.AppEnv, config.EnvProduction) && utf8.RuneCountInString(req.BootKey) < 32 {
+		s.log.Warn("Bootstrap key rejected")
 		return nil, ErrBootstrapKeyInvalid
 	}
 
 	if subtle.ConstantTimeCompare([]byte(req.BootKey), []byte(s.key)) != 1 {
+		s.log.Warn("Bootstrap key rejected")
 		return nil, ErrBootstrapKeyInvalid
 	}
 
@@ -276,8 +293,8 @@ func (s *BootstrapService) CreateFirstUser(ctx context.Context, req *models.Boot
 
 	if err := s.users.CreateFirstUser(ctx, user); err != nil {
 		// The slot is gone for good — someone else created the first account
-		// (bootstrap or open registration) or claimed the email. Either way the
-		// key has nothing left to unlock.
+		// on another replica, or a legacy binary inserted an existing account.
+		// Either way the key has nothing left to unlock.
 		if errors.Is(err, repository.ErrFirstUserExists) || errors.Is(err, repository.ErrUserAlreadyExists) {
 			s.key = ""
 			s.setConfiguredLocked()
@@ -299,14 +316,18 @@ func (s *BootstrapService) CreateFirstUser(ctx context.Context, req *models.Boot
 	// The key is single-use: an instance with an admin is no longer bootstrap-able.
 	s.key = ""
 	s.setConfiguredLocked()
+	// Record the committed account even if session issuance subsequently fails.
+	// Never log the submitted key, password or email address.
+	s.log.Info("Bootstrap administrator created", "user_id", user.ID.String())
 
 	return s.authSvc.IssueSession(ctx, user)
 }
 
-// setConfiguredLocked records that the instance now has a user and invalidates
-// the capability cache so a subsequent status read stops claiming bootstrap is
-// still needed. Callers hold s.mu.
+// setConfiguredLocked permanently closes the capability cache. Callers hold
+// s.mu for the key lifecycle; cacheMu is independent and held only briefly.
 func (s *BootstrapService) setConfiguredLocked() {
+	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
 	s.statusNeedsBootstrap = false
 	s.statusAt = time.Now()
 	s.statusValid = true
@@ -323,6 +344,7 @@ func (s *BootstrapService) ensureKeyLocked(ctx context.Context) error {
 		return err
 	}
 	if !needs {
+		s.setConfiguredLocked()
 		return nil
 	}
 

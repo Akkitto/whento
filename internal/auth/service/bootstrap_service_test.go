@@ -5,11 +5,13 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,6 +22,168 @@ import (
 	"github.com/whento/whento/internal/auth/repository"
 	"github.com/whento/whento/internal/config"
 )
+
+type bootstrapStoreStub struct {
+	read   func(context.Context) (bool, error)
+	create func(context.Context, *models.User) error
+}
+
+func (s *bootstrapStoreStub) FirstUserCreated(ctx context.Context) (bool, error) {
+	return s.read(ctx)
+}
+
+func (s *bootstrapStoreStub) CreateFirstUser(ctx context.Context, user *models.User) error {
+	return s.create(ctx, user)
+}
+
+type blockingBootstrapTokens struct {
+	TokenRepository
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (r *blockingBootstrapTokens) Create(ctx context.Context, token *models.RefreshToken, generation int64) error {
+	close(r.entered)
+	select {
+	case <-r.release:
+		return r.TokenRepository.Create(ctx, token, generation)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func TestBootstrapStatusDoesNotWaitForCreation(t *testing.T) {
+	for _, phase := range []string{"database insert", "session issuance"} {
+		t.Run(phase, func(t *testing.T) {
+			cfg := &config.Config{BootstrapKey: "operator-pinned-boot-key-123", AllowedRegister: true}
+			f := newBootstrapFixture(t, cfg)
+			entered, release := make(chan struct{}), make(chan struct{})
+			var releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			t.Cleanup(unblock)
+			if phase == "database insert" {
+				f.service.users = &bootstrapStoreStub{
+					read: func(context.Context) (bool, error) { return false, nil },
+					create: func(ctx context.Context, user *models.User) error {
+						close(entered)
+						select {
+						case <-release:
+							return f.users.CreateFirstUser(ctx, user)
+						case <-ctx.Done():
+							return ctx.Err()
+						}
+					},
+				}
+			} else {
+				f.auth.tokenRepo = &blockingBootstrapTokens{TokenRepository: f.tokens, entered: entered, release: release}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			created := make(chan error, 1)
+			go func() {
+				_, err := f.service.CreateFirstUser(ctx, &models.BootstrapRequest{
+					BootKey: cfg.BootstrapKey, Email: "owner@example.test", Password: "Str0ng!Passw0rd", DisplayName: "Owner",
+				})
+				created <- err
+			}()
+			select {
+			case <-entered:
+			case <-ctx.Done():
+				t.Fatal("creation did not reach the blocking phase")
+			}
+			statusDone := make(chan error, 1)
+			go func() {
+				status, err := f.service.Status(ctx)
+				if err == nil && status.NeedsBootstrap != (phase == "database insert") {
+					err = errors.New("status does not match committed first-user state")
+				}
+				statusDone <- err
+			}()
+			select {
+			case err := <-statusDone:
+				if err != nil {
+					t.Fatalf("Status: %v", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("Status blocked behind first-user creation")
+			}
+			unblock()
+			if err := <-created; err != nil {
+				t.Fatalf("CreateFirstUser: %v", err)
+			}
+		})
+	}
+}
+
+func TestBootstrapClosedStatusIsPermanent(t *testing.T) {
+	f := newBootstrapFixture(t, &config.Config{AllowedRegister: true})
+	f.users.add(fullUser(t, "admin@example.test", "Admin"))
+	if _, err := f.service.Status(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	before := f.users.firstUserCreatedCalls
+	f.service.cacheMu.Lock()
+	f.service.statusAt = time.Now().Add(-2 * statusCacheTTL)
+	f.service.cacheMu.Unlock()
+	f.users.firstUserCreatedErr = errors.New("database unavailable after closure")
+	status, err := f.service.Status(context.Background())
+	if err != nil || status.NeedsBootstrap || !status.RegistrationEnabled {
+		t.Fatalf("closed Status = %+v, %v", status, err)
+	}
+	if f.users.firstUserCreatedCalls != before {
+		t.Fatal("closed status queried the database")
+	}
+}
+
+func TestBootstrapStaleReadCannotReopenClosedStatus(t *testing.T) {
+	f := newBootstrapFixture(t, &config.Config{})
+	entered, release := make(chan struct{}), make(chan struct{})
+	f.service.users = &bootstrapStoreStub{read: func(context.Context) (bool, error) {
+		close(entered)
+		<-release
+		return false, nil
+	}}
+	done := make(chan bool, 1)
+	go func() {
+		status, _ := f.service.Status(context.Background())
+		done <- status.NeedsBootstrap
+	}()
+	<-entered
+	f.service.mu.Lock()
+	f.service.setConfiguredLocked()
+	f.service.mu.Unlock()
+	close(release)
+	if <-done {
+		t.Fatal("in-flight open read reopened a closed instance")
+	}
+}
+
+func TestBootstrapAuditLogsDoNotLeakSubmittedSecrets(t *testing.T) {
+	cfg := &config.Config{BootstrapKey: "operator-pinned-boot-key-123"}
+	f := newBootstrapFixture(t, cfg)
+	var logs bytes.Buffer
+	f.service.log = slog.New(slog.NewJSONHandler(&logs, nil))
+	req := &models.BootstrapRequest{BootKey: "wrong-operator-secret-key", Email: "owner@example.test", Password: "Str0ng!Passw0rd", DisplayName: "Owner"}
+	if _, err := f.service.CreateFirstUser(context.Background(), req); !errors.Is(err, ErrBootstrapKeyInvalid) {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "Bootstrap key rejected") {
+		t.Fatal("missing failed-key audit event")
+	}
+	req.BootKey = cfg.BootstrapKey
+	f.tokens.createErr = errors.New("session storage unavailable")
+	if _, err := f.service.CreateFirstUser(context.Background(), req); err == nil {
+		t.Fatal("expected session failure")
+	}
+	if !strings.Contains(logs.String(), "Bootstrap administrator created") || !strings.Contains(logs.String(), f.users.created.ID.String()) {
+		t.Fatal("missing committed administrator audit event with user id")
+	}
+	for _, secret := range []string{cfg.BootstrapKey, "wrong-operator-secret-key", req.Password, req.Email} {
+		if strings.Contains(logs.String(), secret) {
+			t.Fatal("bootstrap audit leaked submitted data")
+		}
+	}
+}
 
 // fullUser builds a user with the given identity; ID is set afterwards because
 // models.User carries it in an embedded entity and Go does not allow promoted
@@ -159,9 +323,9 @@ func TestBootstrapStatus(t *testing.T) {
 			t.Fatalf("Status: %v", err)
 		}
 		// Age the cache beyond its TTL and change the underlying truth.
-		f.service.mu.Lock()
+		f.service.cacheMu.Lock()
 		f.service.statusAt = time.Now().Add(-2 * statusCacheTTL)
-		f.service.mu.Unlock()
+		f.service.cacheMu.Unlock()
 		f.users.add(fullUser(t, "admin@example.test", "Admin"))
 
 		status, err := f.service.Status(context.Background())

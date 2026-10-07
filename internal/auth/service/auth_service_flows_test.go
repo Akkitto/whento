@@ -581,6 +581,9 @@ func TestRegisterOnAnUnreadableMarkerSurfacesErrRegistrationState(t *testing.T) 
 	if !errors.Is(err, ErrRegistrationState) {
 		t.Fatalf("registration on an unreadable marker = %v, want ErrRegistrationState", err)
 	}
+	if !errors.Is(err, fixture.users.firstUserCreatedErr) {
+		t.Fatalf("registration error lost the marker read cause: %v", err)
+	}
 	if fixture.users.created != nil {
 		t.Fatal("a user was created although the bootstrap state was unreadable")
 	}

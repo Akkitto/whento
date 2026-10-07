@@ -45,7 +45,7 @@ const (
 	// `day_of_week BETWEEN 0 AND 6` and `source IN ('manual', 'recurrence')` guards.
 	CodeCheckViolation = "23514"
 	// CodeUndefinedTable is raised when a query names a table the schema does not
-	// have yet, e.g. reading app_state on a database older than migration 017.
+	// have yet, e.g. reading app_state on a database older than migration 019.
 	CodeUndefinedTable = "42P01"
 )
 

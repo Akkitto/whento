@@ -50,12 +50,14 @@ func NewBootstrapHandler(service BootstrapFlow, logger *slog.Logger) *BootstrapH
 //	@Tags			Authentication
 //	@Produce		json
 //	@Success		200	{object}	models.BootstrapStatusResponse
+//	@Failure		429	{object}	httputil.ErrorResponse	"Rate limit exceeded"
+//	@Failure		503	{object}	httputil.ErrorResponse	"Bootstrap state temporarily unavailable"
 //	@Router			/api/v1/auth/status [get]
 func (h *BootstrapHandler) Status(w http.ResponseWriter, r *http.Request) {
 	status, err := h.service.Status(r.Context())
 	if err != nil {
 		h.logger.Error("Failed to read bootstrap status", "error", err)
-		httputil.Error(w, http.StatusInternalServerError, httputil.ErrCodeInternal, "Failed to read status")
+		httputil.Error(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Bootstrap state temporarily unavailable")
 		return
 	}
 
@@ -78,6 +80,7 @@ func (h *BootstrapHandler) Status(w http.ResponseWriter, r *http.Request) {
 //	@Failure		401		{object}	httputil.ErrorResponse	"Invalid bootstrap key"
 //	@Failure		409		{object}	httputil.ErrorResponse	"Instance already configured"
 //	@Failure		429		{object}	httputil.ErrorResponse	"Rate limit exceeded"
+//	@Failure		500		{object}	httputil.ErrorResponse	"Bootstrap or session creation failed"
 //	@Router			/api/v1/auth/bootstrap [post]
 func (h *BootstrapHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var req models.BootstrapRequest
