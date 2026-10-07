@@ -5,6 +5,8 @@
 package repository_test
 
 import (
+	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -685,5 +687,107 @@ func TestReminderJobCancelPendingForEvent(t *testing.T) {
 	// One stays (the other event date), the target event was canceled.
 	if pending != 1 {
 		t.Errorf("%d jobs still pending, want 1 (the cancel only hit its own event)", pending)
+	}
+}
+
+func TestReminderMovedLaterCannotBeClaimedEarly(t *testing.T) {
+	pool := dbtest.Pool(t)
+	ctx := dbtest.Context(t)
+	repo := repository.NewReminderJobRepository(pool)
+	job := newReminderJob(t, pool)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	job.ScheduledAt, job.NextAttemptAt = now.Add(-time.Minute), now.Add(-time.Minute)
+	if err := repo.Enqueue(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	job.ScheduledAt, job.NextAttemptAt = now.Add(4*time.Minute), now.Add(4*time.Minute)
+	if err := repo.Enqueue(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	var next time.Time
+	if err := pool.QueryRow(ctx, `SELECT next_attempt_at FROM reminder_jobs WHERE calendar_id=$1`, job.CalendarID).Scan(&next); err != nil {
+		t.Fatal(err)
+	}
+	if next.Before(job.ScheduledAt) {
+		t.Fatalf("moved reminder next_attempt_at=%s precedes scheduled_at=%s", next, job.ScheduledAt)
+	}
+	claimed, err := repo.ClaimDue(ctx, "early-worker", now, time.Minute, 10)
+	if err != nil || len(claimed) != 0 {
+		t.Fatalf("future job claimed early: %+v error=%v", claimed, err)
+	}
+	claimed, err = repo.ClaimDue(ctx, "due-worker", now.Add(5*time.Minute), time.Minute, 10)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("moved job not claimed when due: %+v error=%v", claimed, err)
+	}
+}
+
+func TestReminderExpiredClaimCannotMutateWithoutAReplacement(t *testing.T) {
+	for operation, mutate := range map[string]func(context.Context, *repository.ReminderJobRepository, models.ReminderJob) error{
+		"sent": func(ctx context.Context, repo *repository.ReminderJobRepository, job models.ReminderJob) error {
+			return repo.MarkSent(ctx, job.ID, job.ClaimToken)
+		},
+		"failed": func(ctx context.Context, repo *repository.ReminderJobRepository, job models.ReminderJob) error {
+			return repo.MarkFailed(ctx, job.ID, job.ClaimToken, 1, 5, time.Now(), "expired")
+		},
+		"cancel": func(ctx context.Context, repo *repository.ReminderJobRepository, job models.ReminderJob) error {
+			return repo.CancelClaim(ctx, job.ID, job.ClaimToken)
+		},
+	} {
+		t.Run(operation, func(t *testing.T) {
+			pool := dbtest.Pool(t)
+			ctx := dbtest.Context(t)
+			repo := repository.NewReminderJobRepository(pool)
+			job := newReminderJob(t, pool)
+			now := time.Now().UTC().Truncate(time.Microsecond)
+			job.ScheduledAt, job.NextAttemptAt = now.Add(-time.Minute), now.Add(-time.Minute)
+			if err := repo.Enqueue(ctx, job); err != nil {
+				t.Fatal(err)
+			}
+			claimed, err := repo.ClaimDue(ctx, "expired-worker", now, time.Minute, 1)
+			if err != nil || len(claimed) != 1 {
+				t.Fatalf("claim: %v jobs=%v", err, claimed)
+			}
+			old := claimed[0]
+			if _, err := pool.Exec(ctx, `UPDATE reminder_jobs SET lease_until=now()-interval '1 second' WHERE id=$1`, old.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := mutate(ctx, repo, old); !errors.Is(err, models.ErrClaimLost) {
+				t.Errorf("expired %s=%v, want ErrClaimLost", operation, err)
+			}
+		})
+	}
+}
+
+func TestReminderRescheduleInvalidatesExpiredClaimToken(t *testing.T) {
+	pool := dbtest.Pool(t)
+	ctx := dbtest.Context(t)
+	repo := repository.NewReminderJobRepository(pool)
+	job := newReminderJob(t, pool)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	job.ScheduledAt, job.NextAttemptAt = now.Add(-time.Minute), now.Add(-time.Minute)
+	if err := repo.Enqueue(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := repo.ClaimDue(ctx, "old-worker", now, time.Minute, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("claim: %v jobs=%v", err, claimed)
+	}
+	old := claimed[0]
+	if _, err := pool.Exec(ctx, `UPDATE reminder_jobs SET lease_until=now()-interval '1 second' WHERE id=$1`, old.ID); err != nil {
+		t.Fatal(err)
+	}
+	job.ScheduledAt, job.NextAttemptAt = now.Add(4*time.Minute), now.Add(4*time.Minute)
+	if err := repo.Enqueue(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	var clear bool
+	if err := pool.QueryRow(ctx, `SELECT claim_token IS NULL AND lease_until IS NULL AND locked_by IS NULL AND locked_at IS NULL FROM reminder_jobs WHERE id=$1`, old.ID).Scan(&clear); err != nil {
+		t.Fatal(err)
+	}
+	if !clear {
+		t.Fatal("rescheduled row still carries expired ownership")
+	}
+	if err := repo.MarkSent(ctx, old.ID, old.ClaimToken); !errors.Is(err, models.ErrClaimLost) {
+		t.Fatalf("late completion of rescheduled row: %v", err)
 	}
 }

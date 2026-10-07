@@ -72,10 +72,14 @@ func (r *ReminderJobRepository) Enqueue(
 			canceled_at = NULL,
 			sent_at = NULL,
 			last_error = CASE WHEN reminder_jobs.status = 'canceled' THEN NULL ELSE reminder_jobs.last_error END,
+			claim_token = NULL,
+			lease_until = NULL,
+			locked_by = NULL,
+			locked_at = NULL,
 			next_attempt_at = CASE
 				WHEN reminder_jobs.status = 'canceled' THEN EXCLUDED.next_attempt_at
 				WHEN reminder_jobs.scheduled_at = EXCLUDED.scheduled_at THEN reminder_jobs.next_attempt_at
-				ELSE LEAST(reminder_jobs.next_attempt_at, EXCLUDED.next_attempt_at)
+				ELSE GREATEST(EXCLUDED.scheduled_at, LEAST(reminder_jobs.next_attempt_at, EXCLUDED.next_attempt_at))
 			END,
 			updated_at = now()
 		WHERE reminder_jobs.status IN ('pending', 'canceled')
@@ -120,6 +124,7 @@ func (r *ReminderJobRepository) ClaimDue(
 		WHERE id IN (
 			SELECT id FROM reminder_jobs
 			WHERE status = 'pending'
+			  AND scheduled_at <= $3
 			  AND next_attempt_at <= $3
 			  AND (claim_token IS NULL OR lease_until IS NULL OR lease_until < $3)
 			ORDER BY next_attempt_at
@@ -203,7 +208,7 @@ func (r *ReminderJobRepository) MarkSent(ctx context.Context, id, token uuid.UUI
 		UPDATE reminder_jobs
 		SET status = 'sent', sent_at = now(), claim_token = NULL, lease_until = NULL,
 		    locked_by = NULL, locked_at = NULL, canceled_at = NULL, updated_at = now()
-		WHERE id = $1 AND status = 'pending' AND claim_token = $2`,
+		WHERE id = $1 AND status = 'pending' AND claim_token = $2 AND lease_until >= now()`,
 		id, token)
 	if err != nil {
 		return fmt.Errorf("failed to mark reminder job sent: %w", err)
@@ -237,7 +242,7 @@ func (r *ReminderJobRepository) MarkFailed(
 		SET status = $3, attempt = $4, next_attempt_at = $5, last_error = $6,
 		    claim_token = NULL, lease_until = NULL, locked_by = NULL, locked_at = NULL,
 		    canceled_at = NULL, updated_at = now()
-		WHERE id = $1 AND status = 'pending' AND claim_token = $2`,
+		WHERE id = $1 AND status = 'pending' AND claim_token = $2 AND lease_until >= now()`,
 		id, token, status, attempt, nextAttemptAt, reason)
 	if err != nil {
 		return fmt.Errorf("failed to record reminder job failure: %w", err)
@@ -258,7 +263,7 @@ func (r *ReminderJobRepository) CancelClaim(ctx context.Context, id, token uuid.
 		UPDATE reminder_jobs
 		SET status = 'canceled', canceled_at = now(), claim_token = NULL, lease_until = NULL,
 		    locked_by = NULL, locked_at = NULL, updated_at = now()
-		WHERE id = $1 AND status = 'pending' AND claim_token = $2`,
+		WHERE id = $1 AND status = 'pending' AND claim_token = $2 AND lease_until >= now()`,
 		id, token)
 	if err != nil {
 		return fmt.Errorf("failed to cancel reminder job: %w", err)
@@ -269,13 +274,10 @@ func (r *ReminderJobRepository) CancelClaim(ctx context.Context, id, token uuid.
 	return nil
 }
 
-// CancelPendingForEvent marks every pending job for an event date as canceled,
-// invalidating their claims. This is the explicit reconciliation action the
-// scheduler takes when an event is authoritatively confirmed to no longer
-// qualify (availability dropped below threshold, date left the calendar range),
-// so a stale reminder cannot slip out on a later tick. It is deliberately not
-// called from individual delivery validation, which cancels one delivery at a
-// time; 'sent' rows are never touched.
+// CancelPendingForEvent is an unfenced administrative reconciliation operation:
+// it invalidates all pending claims for the event, leaving sent rows untouched.
+// Delivery workers must NOT call it based on an eligibility snapshot; they use
+// CancelClaim so a stale worker cannot invalidate another worker's newer claim.
 func (r *ReminderJobRepository) CancelPendingForEvent(
 	ctx context.Context,
 	calendarID uuid.UUID,

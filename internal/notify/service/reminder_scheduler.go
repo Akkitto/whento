@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"html"
 	"log/slog"
-	"math"
 	"time"
 
 	"github.com/google/uuid"
@@ -116,7 +115,13 @@ type ReminderJobStore interface {
 	MarkSent(ctx context.Context, id, token uuid.UUID) error
 	MarkFailed(ctx context.Context, id, token uuid.UUID, attempt, maxAttempts int, nextAttemptAt time.Time, reason string) error
 	CancelClaim(ctx context.Context, id, token uuid.UUID) error
-	CancelPendingForEvent(ctx context.Context, calendarID uuid.UUID, eventDate time.Time) error
+}
+
+// ReminderMailer must honor cancellation and a delivery deadline. The ordinary
+// notification Mailer also serves older callers, which only require Send.
+type ReminderMailer interface {
+	IsConfigured() bool
+	SendContext(ctx context.Context, msg email.Email) error
 }
 
 // ReminderCalendarStore lists the calendars the scheduler has to inspect, and
@@ -142,7 +147,7 @@ type ReminderAvailabilityStore interface {
 //   - jobs are persisted (unique key: calendar + event date + recipient + channel);
 //   - a job is claimed atomically by exactly one delivery (ClaimDue, FOR UPDATE
 //     SKIP LOCKED) under a UUID claim token and a lease, so several instances —
-//     or one instance claiming twice — can never double-deliver;
+//     or one instance claiming twice — cannot share an unexpired claim;
 //   - deliveries are retried with backed-off fenced failures and permanently
 //     failed after N tries;
 //   - a redeploy is survived: send-windows that passed while the process was
@@ -152,16 +157,17 @@ type ReminderAvailabilityStore interface {
 //   - the send-window horizon is computed in the calendar's own timezone, so a
 //     calendar east of UTC does not lose the day its event actually lands on.
 //
-// Delivery is at-least-once: the external send may commit after the database
-// write that marks the job sent, so a crash between the two can deliver a
-// reminder whose row already says 'sent'. There is no exactly-once claim.
+// Delivery is at-least-once: a provider may accept a send before completion is
+// recorded in the database, so a crash between the two can cause a retry. Claim
+// fencing protects queue state, not a provider's side effects; exactly-once
+// delivery is not promised.
 type ReminderScheduler struct {
 	calendarRepo     ReminderCalendarStore
 	availabilityRepo ReminderAvailabilityStore
 	participantRepo  ParticipantStore
 	userRepo         UserStore
 	notificationLog  NotificationLog
-	emailService     Mailer
+	emailService     ReminderMailer
 	externalNotifier ChannelNotifier
 	jobs             ReminderJobStore
 	appURL           string
@@ -180,7 +186,7 @@ type ReminderScheduler struct {
 
 // NewReminderScheduler creates a reminder scheduler with the operator tunables
 // overlaid on production defaults. Tests can drop the tunables to
-// NewReminderTunables() (and replace the clock through the exported `now` field,
+// NewReminderTunables() (and replace the clock through the private `now` field,
 // which is how the deterministic schedule is exercised).
 func NewReminderScheduler(
 	calendarRepo ReminderCalendarStore,
@@ -188,7 +194,7 @@ func NewReminderScheduler(
 	participantRepo ParticipantStore,
 	userRepo UserStore,
 	notificationLog NotificationLog,
-	emailService Mailer,
+	emailService ReminderMailer,
 	externalNotifier ChannelNotifier,
 	jobs ReminderJobStore,
 	appURL string,
@@ -469,7 +475,7 @@ func (s *ReminderScheduler) upcomingEventDates(
 		localMidnight := time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, loc)
 		scheduledAt := localMidnight.Add(-hoursBefore).UTC()
 
-		if !s.windowOpen(scheduledAt, now) {
+		if !s.windowOpen(scheduledAt, now) || !localMidnight.After(now) {
 			continue
 		}
 		if calendar.StartDate != nil && marker.Before(*calendar.StartDate) {
@@ -533,14 +539,17 @@ func (s *ReminderScheduler) deliverDue(ctx context.Context) (bool, error) {
 //   - individual delivery no longer wanted (channel/recipient off, SMTP gone)
 //     cancels only this pending delivery, under its claim token — other
 //     channels and recipients stay valid;
-//   - an authoritatively confirmed non-qualifying event cancels the event's
-//     pending jobs as a reconciliation action;
+//   - an authoritatively confirmed non-qualifying or elapsed event cancels
+//     this job under its claim; other jobs independently recheck eligibility;
 //   - a transient error (calendar read, count query) retries the job with fenced
 //     backoff, never cancels anything.
 //
 // A lost claim anywhere in here is a recognizable no-op: the token stops a late
 // worker from retrying or canceling on behalf of the worker that won the claim.
 func (s *ReminderScheduler) deliverOne(ctx context.Context, job models.ReminderJob) {
+	if ctx.Err() != nil {
+		return
+	}
 	jobLog := s.logger.With("job_id", job.ID,
 		"calendar_id", job.CalendarID,
 		"date", job.EventDate.Format("2006-01-02"),
@@ -588,25 +597,18 @@ func (s *ReminderScheduler) deliverOne(ctx context.Context, job models.ReminderJ
 		return
 	}
 	if !qualified {
-		// Authoritatively confirmed: the event no longer qualifies. Explicit
-		// reconciliation cancels the event's pending jobs.
-		jobLog.Info("Reminder event no longer qualifies; canceling the event's pending deliveries")
-		if err := s.jobs.CancelPendingForEvent(ctx, job.CalendarID, job.EventDate); err != nil {
-			s.logger.Error("Failed to cancel reminder jobs for event", "job_id", job.ID, "error", err)
-		}
-		return
-	}
-
-	// Bounded lease renewal immediately before the external send: the claim
-	// lease could lapse during a slow verification, which would let a second
-	// worker deliver the same reminder. A lost claim here is a recognizable
-	// no-op — never a reason to retry or cancel the event.
-	if err := s.jobs.RenewLease(ctx, job.ID, job.ClaimToken, s.now(), preSendLease); err != nil {
-		s.logger.Info("Reminder job claim lost before send; skipping", "job_id", job.ID, "error", err)
+		// This snapshot must not invalidate another worker's newer claim. Each
+		// delivery checks the event itself and cancels only the claim it owns.
+		jobLog.Info("Reminder event no longer qualifies; canceling owned delivery")
+		s.cancelClaim(ctx, job)
 		return
 	}
 
 	if err := s.sendJob(ctx, calendar, &cfg, job); err != nil {
+		if errors.Is(err, models.ErrClaimLost) || ctx.Err() != nil {
+			jobLog.Info("Reminder delivery stopped: claim lost or context canceled", "error", err)
+			return
+		}
 		s.logger.Error("Reminder delivery failed",
 			"job_id", job.ID, "calendar_id", job.CalendarID,
 			"date", job.EventDate.Format("2006-01-02"), "channel", job.Channel, "error", err)
@@ -665,6 +667,11 @@ func (s *ReminderScheduler) jobStillWanted(calendar *calendarModels.Calendar, cf
 }
 
 func (s *ReminderScheduler) eventQualifies(ctx context.Context, calendar *calendarModels.Calendar, date time.Time) (bool, error) {
+	// Persisted retries can outlive the catch-up window. Do not send an
+	// "upcoming" reminder after the event's calendar-local day has begun.
+	if !s.eventMidnight(date, s.timezoneOf(calendar)).After(s.now()) {
+		return false, nil
+	}
 	if calendar.StartDate != nil && date.Before(*calendar.StartDate) {
 		return false, nil
 	}
@@ -686,7 +693,7 @@ func (s *ReminderScheduler) eventQualifies(ctx context.Context, calendar *calend
 func (s *ReminderScheduler) recordFailure(ctx context.Context, job models.ReminderJob, cause error) {
 	attempt := job.Attempt + 1
 	next := s.now().Add(s.backoff(attempt))
-	if err := s.jobs.MarkFailed(ctx, job.ID, job.ClaimToken, attempt, s.maxAttempts, next, cause.Error()); err != nil {
+	if err := s.jobs.MarkFailed(ctx, job.ID, job.ClaimToken, attempt, job.MaxAttempts, next, cause.Error()); err != nil {
 		if errors.Is(err, models.ErrClaimLost) {
 			s.logger.Info("Reminder job failure report lost its claim; treating as no-op", "job_id", job.ID)
 			return
@@ -698,19 +705,35 @@ func (s *ReminderScheduler) recordFailure(ctx context.Context, job models.Remind
 // backoff computes the exponential backoff for a given attempt number: base
 // doubled per attempt, capped at max.
 func (s *ReminderScheduler) backoff(attempt int) time.Duration {
-	multiplier := math.Pow(2, float64(maxInt(0, attempt-1)))
-	d := time.Duration(float64(s.backoffBase) * multiplier)
-	if d > s.backoffMax {
+	d := s.backoffBase
+	if d >= s.backoffMax {
 		return s.backoffMax
+	}
+	for retry := 1; retry < attempt; retry++ {
+		// Saturate before multiplying: converting an overflowed float to a
+		// duration can wrap negative and produce a hot-loop retry schedule.
+		if d > s.backoffMax/2 {
+			return s.backoffMax
+		}
+		d *= 2
 	}
 	return d
 }
 
-func maxInt(a, b int) int {
-	if a > b {
-		return a
+// deliveryContext renews immediately before EACH external send, not once for
+// an entire participant fanout. Renewal and delivery share a deadline shorter
+// than the lease, leaving time to record the result. Lost claims stop fanout.
+func (s *ReminderScheduler) deliveryContext(ctx context.Context, job models.ReminderJob) (context.Context, context.CancelFunc, error) {
+	bounded, cancel := context.WithTimeout(ctx, preSendLease/2)
+	if err := bounded.Err(); err != nil {
+		cancel()
+		return nil, nil, err
 	}
-	return b
+	if err := s.jobs.RenewLease(bounded, job.ID, job.ClaimToken, s.now(), preSendLease); err != nil {
+		cancel()
+		return nil, nil, err
+	}
+	return bounded, cancel, nil
 }
 
 // sendJob delivers one job through the channel it names.
@@ -725,16 +748,16 @@ func (s *ReminderScheduler) sendJob(
 		if job.RecipientType != models.ReminderRecipientOwner {
 			return fmt.Errorf("chat channel %q only reaches the owner", job.Channel)
 		}
-		return s.sendOwnerChat(ctx, calendar, cfg, job.Channel, job.EventDate)
+		return s.sendOwnerChat(ctx, calendar, cfg, job)
 	case "email":
 		if job.RecipientType == models.ReminderRecipientOwner {
 			owner, err := s.userRepo.GetByID(ctx, calendar.OwnerID)
 			if err != nil {
 				return fmt.Errorf("load owner: %w", err)
 			}
-			return s.sendEmail(ctx, calendar, job.EventDate, owner.Email, owner.Locale, nil)
+			return s.sendEmail(ctx, calendar, job, owner.Email, owner.Locale, nil)
 		}
-		return s.sendParticipantEmails(ctx, calendar, job.EventDate)
+		return s.sendParticipantEmails(ctx, calendar, job)
 	default:
 		return fmt.Errorf("unknown reminder channel %q", job.Channel)
 	}
@@ -746,9 +769,9 @@ func (s *ReminderScheduler) sendOwnerChat(
 	ctx context.Context,
 	calendar *calendarModels.Calendar,
 	cfg *models.NotifyConfig,
-	channel string,
-	date time.Time,
+	job models.ReminderJob,
 ) error {
+	channel, date := job.Channel, job.EventDate
 	owner, err := s.userRepo.GetByID(ctx, calendar.OwnerID)
 	if err != nil {
 		return fmt.Errorf("load owner: %w", err)
@@ -765,31 +788,36 @@ func (s *ReminderScheduler) sendOwnerChat(
 	if sent {
 		return nil
 	}
+	sendCtx, cancel, err := s.deliveryContext(ctx, job)
+	if err != nil {
+		return err
+	}
+	defer cancel()
 
 	var sendErr error
 	switch channel {
 	case "discord":
-		sendErr = s.externalNotifier.SendDiscord(ctx, cfg.Channels.Discord.WebhookURL, text)
+		sendErr = s.externalNotifier.SendDiscord(sendCtx, cfg.Channels.Discord.WebhookURL, text)
 	case "slack":
-		sendErr = s.externalNotifier.SendSlack(ctx, cfg.Channels.Slack.WebhookURL, text)
+		sendErr = s.externalNotifier.SendSlack(sendCtx, cfg.Channels.Slack.WebhookURL, text)
 	case "telegram":
-		sendErr = s.externalNotifier.SendTelegram(ctx, cfg.Channels.Telegram.BotToken, cfg.Channels.Telegram.ChatID, text)
+		sendErr = s.externalNotifier.SendTelegram(sendCtx, cfg.Channels.Telegram.BotToken, cfg.Channels.Telegram.ChatID, text)
 	}
 	if sendErr != nil {
 		return sendErr
 	}
 
-	_ = s.notificationLog.LogNotification(
-		ctx, calendar.ID, date, reminderEventType, "owner", owner.ID, channel,
+	return s.notificationLog.LogNotification(
+		sendCtx, calendar.ID, date, reminderEventType, "owner", owner.ID, channel,
 	)
-	return nil
 }
 
 // sendParticipantEmails fans the reminder out to the verified participants who
 // declared themselves available on the event date. Consent is re-read by the
 // caller before this is reached: an owner who revoked participant mail, or an
 // instance whose SMTP vanished, must not have a queued job fire afterwards.
-func (s *ReminderScheduler) sendParticipantEmails(ctx context.Context, calendar *calendarModels.Calendar, date time.Time) error {
+func (s *ReminderScheduler) sendParticipantEmails(ctx context.Context, calendar *calendarModels.Calendar, job models.ReminderJob) error {
+	date := job.EventDate
 	available, err := s.availabilityRepo.GetAvailableParticipantsForDate(ctx, calendar.ID, date)
 	if err != nil {
 		return fmt.Errorf("load available participants: %w", err)
@@ -811,7 +839,10 @@ func (s *ReminderScheduler) sendParticipantEmails(ctx context.Context, calendar 
 		if !availableNow || p.Email == nil || !p.EmailVerified {
 			continue
 		}
-		if err := s.sendEmail(ctx, calendar, date, *p.Email, p.Locale, &p.ID); err != nil {
+		if err := s.sendEmail(ctx, calendar, job, *p.Email, p.Locale, &p.ID); err != nil {
+			if errors.Is(err, models.ErrClaimLost) || ctx.Err() != nil {
+				return err
+			}
 			s.logger.Error("Failed to send participant reminder email",
 				"recipient_ref", pkglog.Fingerprint(*p.Email),
 				"participant_ref", pkglog.Fingerprint(p.ID.String()),
@@ -826,10 +857,11 @@ func (s *ReminderScheduler) sendParticipantEmails(ctx context.Context, calendar 
 func (s *ReminderScheduler) sendEmail(
 	ctx context.Context,
 	calendar *calendarModels.Calendar,
-	date time.Time,
+	job models.ReminderJob,
 	to, locale string,
 	participantID *uuid.UUID,
 ) error {
+	date := job.EventDate
 	if !s.emailService.IsConfigured() {
 		return fmt.Errorf("email not configured")
 	}
@@ -864,7 +896,12 @@ func (s *ReminderScheduler) sendEmail(
 		"recipient_ref", pkglog.Fingerprint(to),
 		"is_owner", participantID == nil)
 
-	if err := s.emailService.Send(email.Email{
+	sendCtx, cancel, err := s.deliveryContext(ctx, job)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	if err := s.emailService.SendContext(sendCtx, email.Email{
 		To:      []string{to},
 		Subject: reminderSubject(locale),
 		Body:    body,
@@ -874,7 +911,7 @@ func (s *ReminderScheduler) sendEmail(
 	}
 
 	return s.notificationLog.LogNotification(
-		ctx, calendar.ID, date, reminderEventType, recipientType, recipientID, "email",
+		sendCtx, calendar.ID, date, reminderEventType, recipientType, recipientID, "email",
 	)
 }
 
@@ -921,7 +958,7 @@ func (s *ReminderScheduler) buildReminderEmail(
 		<p><a href="%s" class="btn">%s</a></p>
 	</div>
 </body>
-</html>`, title, bodyText, calendarURL, viewButton)
+</html>`, title, bodyText, html.EscapeString(calendarURL), viewButton)
 }
 
 // reminderSubject localises the email subject line.

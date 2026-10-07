@@ -146,6 +146,13 @@ type fakeMailer struct {
 
 func (f *fakeMailer) IsConfigured() bool { return f.configured }
 
+func (f *fakeMailer) SendContext(ctx context.Context, msg email.Email) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return f.Send(msg)
+}
+
 func (f *fakeMailer) Send(msg email.Email) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
