@@ -179,6 +179,27 @@ line per release rather than listed individually.
   Every provider send renews the claim and honors a shorter context deadline,
   including each recipient in a slow fanout. Lost claims/shutdown stop further
   sends; chat delivery ledger failures are retried rather than ignored.
+- **Reminder transport errors do not persist provider credentials.** Webhook
+  URLs, bot tokens and recipient addresses embedded in provider errors are not
+  copied into reminder logs or the queue's `last_error`; wrapped error identity
+  remains available for cancellation handling.
+- **Reminder retries retain per-recipient completion for the entire event.**
+  A bouncing participant no longer makes successful recipients receive another
+  reminder after the threshold ledger's one-hour anti-spam window. Lease renewal
+  cannot shorten a live claim. Successful delivery clears previous error metadata.
+- **Reminder state has bounded retention and missed-window visibility.** Jobs and
+  recipient completion are cleaned in bounded batches after the event and state
+  are more than 30 days old. Missed windows are recorded and warned once per
+  delivery. Participant emails include localized participation-cancellation links.
+- **Reminder workers are joined before database shutdown.** Canceled SMTP sockets
+  close promptly, while confirmed sends get bounded completion writes before the
+  pool closes. Migration 020 checks valid delivery states and channels, and scans
+  only notification/reminder-enabled calendars through a matching partial index.
+- **Participant email status survives capability-probe failures.** Existing verified
+  or pending addresses remain visible with a warning and retry; sending actions
+  wait for available SMTP and owner consent. The no-op SMTP config adapter is gone.
+  Both locales explain the local-midnight reminder anchor, and participant mail
+  APIs document their consent/capability 403 responses.
 
 ## [v2.0.0] — 2026-08-18
 
