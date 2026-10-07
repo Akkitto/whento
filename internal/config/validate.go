@@ -65,6 +65,7 @@ func (c *Config) Validate() error {
 		c.validateDatabasePool,
 		c.validateCrypto,
 		c.validateExpiries,
+		c.validateReminders,
 		c.validateNetworkLists,
 		c.validateBootstrap,
 		c.validateProductionCoherence,
@@ -190,6 +191,25 @@ func (c *Config) validateNetworkLists() error {
 		return err
 	}
 	return validateCORSOrigins(c.CORSOrigins)
+}
+
+func (c *Config) validateReminders() error {
+	if c.Reminders.HoursBefore < 1 || c.Reminders.HoursBefore > 168 {
+		return fmt.Errorf("REMINDER_HOURS_BEFORE=%d must be between 1 and 168 hours", c.Reminders.HoursBefore)
+	}
+	if c.Reminders.CatchUpWindow <= 0 || c.Reminders.CatchUpWindow > 24*time.Hour {
+		return fmt.Errorf("REMINDER_CATCH_UP_WINDOW=%s must be positive and at most 24h", c.Reminders.CatchUpWindow)
+	}
+	if c.Reminders.Interval <= 0 || c.Reminders.Interval > c.Reminders.CatchUpWindow {
+		return fmt.Errorf("REMINDER_INTERVAL=%s must be positive and no longer than REMINDER_CATCH_UP_WINDOW=%s", c.Reminders.Interval, c.Reminders.CatchUpWindow)
+	}
+	if c.Reminders.MaxAttempts < 1 || int64(c.Reminders.MaxAttempts) > 2147483647 {
+		return fmt.Errorf("REMINDER_MAX_ATTEMPTS=%d must be between 1 and 2147483647", c.Reminders.MaxAttempts)
+	}
+	if c.Reminders.RetryBackoff <= 0 {
+		return fmt.Errorf("REMINDER_RETRY_BACKOFF=%s must be positive", c.Reminders.RetryBackoff)
+	}
+	return nil
 }
 
 // validateTrustedProxies pins the invariant the rate limiter depends on: by the
