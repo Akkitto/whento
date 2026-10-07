@@ -326,6 +326,11 @@ def pr_url(number, validation=""):
     title, body = draft.splitlines()[0].removeprefix("# "), "\n".join(draft.splitlines()[2:]).strip()
     if validation:
         body += f"\n\nAutomated replay verification: {validation}"
+    else:
+        # Later status-only runs must still give reviewers an evidence route.
+        # This is a run index, not a claim that the current plan reran the gate.
+        body += ("\n\nVerification evidence: see the successful publish-job summary in the "
+                 f"[fork publication runs](https://github.com/{FORK}/actions/workflows/pr163-publication.yml).")
     query = urllib.parse.urlencode({"quick_pull": "1", "title": title, "body": body})
     ref = urllib.parse.quote("codex/pr163-submit-" + slug, safe="")
     return f"https://github.com/{UPSTREAM}/compare/main...Akkitto:{ref}?{query}"

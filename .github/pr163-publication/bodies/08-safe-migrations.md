@@ -13,6 +13,6 @@ Related to #163; focused PR 8 of 8. Submit after session coordination is merged.
 
 ## Verification
 
-The publication gate requires the migration acceptance suite, shellcheck, both Go module/build-variant race matrices, frontend static checks/coverage/four shuffle seeds, browser suites and deployment builds. The successful verification run is linked below. Acceptance covers real CLI creation, the pinned v4.19.1 installer checksum and four real PostgreSQL fresh/upgrade cases.
+The publication gate requires the migration acceptance suite, shellcheck, both Go module/build-variant race matrices, frontend static checks/coverage/four shuffle seeds, browser suites and deployment builds. Successful publication runs record the verification evidence. Acceptance covers real CLI creation, the pinned v4.19.1 installer checksum and four real PostgreSQL fresh/upgrade cases.
 
 No new application migration in this tooling PR. `reset` requires confirmation; `down [N]` is an explicit destructive rollback and does not prompt. Real acceptance requires a disposable server with CREATE DATABASE permission and drops only its own random databases. The installer currently targets Linux AMD64, matching the documented CI binary.

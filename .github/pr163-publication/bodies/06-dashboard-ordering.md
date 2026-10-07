@@ -11,6 +11,6 @@ Related to #163; focused PR 6 of 8. Submit after holiday compatibility is merged
 
 ## Verification
 
-The publication gate reruns frontend type/lint/format checks, coverage and four shuffle seeds, dashboard keyboard and desktop/mobile browser tests, real-backend tests, both Go module/build-variant race matrices and deployment builds. The successful verification run is linked below. The isolated preview rejects unexpected network requests; keyboard tests cover reordering, boundary focus and announcements.
+The publication gate reruns frontend type/lint/format checks, coverage and four shuffle seeds, dashboard keyboard and desktop/mobile browser tests, real-backend tests, both Go module/build-variant race matrices and deployment builds. Successful publication runs record the verification evidence. The isolated preview rejects unexpected network requests; keyboard tests cover reordering, boundary focus and announcements.
 
 No schema migration. Preferences are browser-local `localStorage` state, not server-synchronized settings.

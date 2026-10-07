@@ -235,6 +235,15 @@ class ReplayTests(unittest.TestCase):
 
 
 class BoundaryTests(unittest.TestCase):
+    def test_status_only_forms_link_evidence_without_claiming_a_new_verification_run(self):
+        body = pub.urllib.parse.parse_qs(pub.urllib.parse.urlsplit(pub.pr_url(4)).query)["body"][0]
+        self.assertIn("https://github.com/Akkitto/whento/actions/workflows/pr163-publication.yml", body)
+        self.assertNotIn("Automated replay verification:", body)
+        actual_run = "https://github.com/Akkitto/whento/actions/runs/37674983847"
+        verified = pub.urllib.parse.parse_qs(pub.urllib.parse.urlsplit(pub.pr_url(4, actual_run)).query)["body"][0]
+        self.assertIn("Automated replay verification: " + actual_run, verified)
+        self.assertNotIn("actions/workflows/pr163-publication.yml", verified)
+
     def test_plan_rejects_untrusted_fields(self):
         for field, value in (("number", True), ("number", 2), ("number", 9),
                              ("target", "main"), ("slug", "wrong"),
