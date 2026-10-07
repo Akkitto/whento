@@ -799,7 +799,7 @@
     "reminders": "Rappels",
     "enableReminders": "Envoyer des rappels avant les événements",
     "hoursBefore": "Heures avant l'événement",
-    "hoursBeforeHelp": "Envoyer un rappel 1 à 168 heures avant minuit au début de la date de l'événement, dans le fuseau horaire du calendrier. Par exemple, 1 heure signifie 23 h la veille ; 24 heures signifie minuit la veille.",
+    "hoursBeforeHelp": "Envoyer un rappel 1 à 168 heures réelles avant minuit au début de la date de l'événement, dans le fuseau horaire du calendrier. En général, 1 heure signifie 23 h la veille et 24 heures signifie le minuit précédent ; les changements d'heure peuvent décaler l'heure locale.",
     "emailVerification": "Vérification d'email",
     "addEmail": "Ajouter un email pour recevoir les notifications",
     "emailPlaceholder": "email{'@'}example.com",

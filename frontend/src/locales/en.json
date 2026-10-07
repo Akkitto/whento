@@ -799,7 +799,7 @@
     "reminders": "Reminders",
     "enableReminders": "Send reminder notifications before events",
     "hoursBefore": "Hours before event",
-    "hoursBeforeHelp": "Send a reminder 1–168 hours before midnight at the start of the event date, in the calendar's time zone. For example, 1 hour means 23:00 on the previous day; 24 hours means midnight on the previous day.",
+    "hoursBeforeHelp": "Send a reminder 1–168 elapsed hours before midnight at the start of the event date, in the calendar's time zone. Normally, 1 hour means 23:00 on the previous day and 24 hours means the previous midnight; daylight-saving changes can shift the local time.",
     "emailVerification": "Email Verification",
     "addEmail": "Add email to receive notifications",
     "emailPlaceholder": "email{'@'}example.com",
