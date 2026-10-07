@@ -37,6 +37,10 @@ which never executes candidate application code.
   publication-only main pushes; all application-changing pushes, PR checks, and
   security scans remain enabled. Do not use `[skip ci]` on a refresh intended to
   start this push-triggered publication. Manual and scheduled runs remain available.
+  A helper update supersedes/cancels an older publication run, so obsolete stalled
+  setup cannot hold the queue. Manual/scheduled polling still queues without
+  cancelling active work. Cancellation cannot overwrite an existing branch; a
+  subsequent plan discovers any submission already created before cancellation.
 - For topic 3–8, wait for its immediately preceding topic to merge into upstream
   `main`. PR 1 is independent. Replay **only that topic's owning patch**, preserving
   upstream notes in the Unreleased Changelog. Produce one Conventional Commit on
@@ -94,6 +98,8 @@ Run `37668832226` stopped correctly when upstream merged #183/#184 between
 planning and preparation. The current-main equality guard is deliberate: a new
 run plans against the new main rather than publishing an untested or stale base.
 Another upstream change during verification likewise requires a fresh run.
+Tool setup skips package operations when the hosted tools already exist; needed
+downloads use bounded retries/timeouts and the setup step has a ten-minute limit.
 
 Submission branches are created one at a time as
 prerequisites merge. No force-update of an existing branch is possible. Disable

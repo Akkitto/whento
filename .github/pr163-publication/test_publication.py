@@ -31,6 +31,12 @@ def plan(number=3):
 
 
 class WorkflowTests(unittest.TestCase):
+    def test_only_reviewed_helper_pushes_cancel_superseded_runs(self):
+        workflow = (pub.ROOT.parent / "workflows" / "pr163-publication.yml").read_text()
+        self.assertIn("  group: pr163-publication", workflow)
+        self.assertIn("  cancel-in-progress: ${{ github.event_name == 'push' }}", workflow)
+        self.assertNotIn("actions: write", workflow)
+
     def install_script(self):
         workflow = (pub.ROOT.parent / "workflows" / "pr163-publication.yml").read_text()
         step = workflow.split("      - name: Install test clients\n", 1)[1].split("      - name:", 1)[0]

@@ -18,7 +18,9 @@ permissions:
 
 concurrency:
   group: pr163-publication
-  cancel-in-progress: false
+  # A reviewed helper update supersedes an older run (including stalled setup).
+  # Routine polling/manual runs still queue; branch creation remains lease-only.
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 jobs:
   plan:
