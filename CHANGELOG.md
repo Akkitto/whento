@@ -58,8 +58,8 @@ line per release rather than listed individually.
 ### Changed
 
 - **Breaking: public registration no longer creates the first administrator.**
-  Fresh installs and deployed instances that have never had users must complete
-  operator-key bootstrap, even with registration enabled. Read the startup logs
+  Fresh installs and deployed databases empty when migration 019 first runs must
+  complete operator-key bootstrap, even with registration enabled. Read the startup logs
   for an unpinned key, or pin a random secret (prefer `_FILE` in production).
   Log readers can claim admin before setup when the generated-key default is used.
   Existing-user installations are backfilled as configured, without promoting

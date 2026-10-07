@@ -119,9 +119,10 @@ The application is accessible at `http://localhost:8080`
 **The first administrator requires the operator's one-time bootstrap key.**
 Public registration cannot create the first account, even with
 `ALLOWED_REGISTER=true`. This also applies when upgrading an already-deployed
-instance that has never had a user. Visit `/bootstrap` and provide the key,
-email, display name and a strong password. This account is email-verified and
-signed in immediately, so first-run setup does not depend on working SMTP.
+database that is empty when migration `019_app_state` first runs. Visit
+`/bootstrap` and provide the key, email, display name and a strong password. This
+account is email-verified and signed in immediately, so first-run setup does not
+depend on working SMTP.
 Later public registrations, if enabled, create ordinary `user` accounts.
 
 If no key is pinned, read the generated key in the app's startup logs:
