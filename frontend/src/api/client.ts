@@ -184,8 +184,12 @@ class ApiClient {
       async (error: AxiosError<ApiResponse<never>>) => {
         const originalRequest = error.config;
 
-        // Don't try to refresh token for auth endpoints (login, register, refresh)
+        // Bootstrap authenticates the operator key, not the browser's session.
+        // Its 401 must preserve both this tab's session and every other tab's.
+        const isBootstrapEndpoint = originalRequest?.url?.split('?')[0] === '/auth/bootstrap';
+        // Don't try to refresh token for credential-submission endpoints.
         const isAuthEndpoint =
+          isBootstrapEndpoint ||
           originalRequest?.url?.includes('/auth/login') ||
           originalRequest?.url?.includes('/auth/register') ||
           originalRequest?.url?.includes('/auth/refresh');
@@ -210,7 +214,7 @@ class ApiClient {
         }
 
         // If 401 on auth endpoint (e.g., refresh failed), force logout
-        if (error.response?.status === 401 && isAuthEndpoint) {
+        if (error.response?.status === 401 && isAuthEndpoint && !isBootstrapEndpoint) {
           this.forceLogout();
         }
 

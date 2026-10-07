@@ -32,6 +32,13 @@
           class="mb-6 rounded-lg border border-danger-200 bg-danger-50 p-4 text-sm text-danger-800 dark:border-danger-800 dark:bg-danger-900/20 dark:text-danger-400"
         >
           {{ error }}
+          <router-link
+            v-if="bootstrapRequired"
+            to="/bootstrap"
+            class="mt-2 block font-medium underline"
+          >
+            {{ t('auth.bootstrap.title') }}
+          </router-link>
         </div>
 
         <!-- Form -->
@@ -160,6 +167,7 @@ const errors = reactive({
 
 const error = ref('');
 const loading = ref(false);
+const bootstrapRequired = ref(false);
 
 function validateForm(): boolean {
   errors.display_name = '';
@@ -196,6 +204,7 @@ function validateForm(): boolean {
 
 async function handleSubmit() {
   error.value = '';
+  bootstrapRequired.value = false;
   errors.display_name = '';
   errors.email = '';
   errors.password = '';
@@ -230,7 +239,17 @@ async function handleSubmit() {
         }
       });
     } else {
-      error.value = t(translateErrorMessage(err, { fallback: 'auth.registerError' }));
+      if (err.code === 'BOOTSTRAP_REQUIRED') {
+        bootstrapRequired.value = true;
+        authStore.bootstrapRequired = true;
+        authStore.bootstrapStatusKnown = true;
+      }
+      error.value = t(
+        translateErrorMessage(err, {
+          fallback: 'auth.registerError',
+          overrides: { BOOTSTRAP_REQUIRED: 'auth.bootstrap.registrationRequired' },
+        })
+      );
     }
   } finally {
     loading.value = false;

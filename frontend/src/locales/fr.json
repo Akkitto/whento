@@ -175,8 +175,9 @@
       "bootKeyLabel": "Clé d'initialisation",
       "bootKeyHelp": "La clé d'initialisation à usage unique a été affichée dans les journaux du serveur au démarrage (ou définie via BOOTSTRAP_KEY).",
       "createAccount": "Créer le compte administrateur",
-      "alreadyConfigured": "Cette instance a déjà un administrateur.",
-      "invalidKey": "La clé d'initialisation est invalide. Vérifiez les journaux du serveur — la clé est affichée une seule fois au démarrage.",
+      "alreadyConfigured": "Cette instance est déjà configurée. L'initialisation est fermée ; connectez-vous à un compte existant.",
+      "invalidKey": "La clé d'initialisation est invalide. Utilisez la clé configurée par l'opérateur ou la dernière clé générée dans les journaux de démarrage.",
+      "registrationRequired": "L'opérateur doit créer le premier administrateur sur la page d'initialisation avant l'ouverture des inscriptions.",
       "needUser": "Créez le premier compte"
     }
   },
@@ -484,6 +485,11 @@
   },
   "validation": {
     "fields": {
+      "boot_key": {
+        "required": "La clé d'initialisation est obligatoire",
+        "min": "La clé d'initialisation doit contenir au moins {count} caractères",
+        "max": "La clé d'initialisation doit contenir au plus {count} caractères"
+      },
       "email": {
         "required": "L'adresse email est requise",
         "email": "L'adresse email n'est pas valide",
@@ -492,7 +498,7 @@
       "password": {
         "required": "Le mot de passe est requis",
         "min": "Le mot de passe doit contenir au moins 12 caractères avec au moins une majuscule, une minuscule, un chiffre et un caractère spécial",
-        "max": "Le mot de passe ne peut pas dépasser 72 caractères"
+        "max": "Le mot de passe ne peut pas dépasser 72 octets UTF-8"
       },
       "display_name": {
         "required": "Le nom d'affichage est requis",
@@ -505,7 +511,7 @@
       "new_password": {
         "required": "Le nouveau mot de passe est requis",
         "min": "Le nouveau mot de passe doit contenir au moins 12 caractères avec au moins une majuscule, une minuscule, un chiffre et un caractère spécial",
-        "max": "Le nouveau mot de passe ne peut pas dépasser 72 caractères"
+        "max": "Le nouveau mot de passe ne peut pas dépasser 72 octets UTF-8"
       },
       "locale": {
         "oneof": "La langue doit être l'une des suivantes : français, anglais"

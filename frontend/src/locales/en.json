@@ -175,8 +175,9 @@
       "bootKeyLabel": "Boot key",
       "bootKeyHelp": "The one-time boot key was printed to the server logs at startup (or set via BOOTSTRAP_KEY).",
       "createAccount": "Create administrator account",
-      "alreadyConfigured": "This instance already has an administrator.",
-      "invalidKey": "The boot key is invalid. Check the server logs — the key is printed once at startup.",
+      "alreadyConfigured": "This instance is already configured. Bootstrap is closed; sign in to an existing account.",
+      "invalidKey": "The boot key is invalid. Use the key configured by the operator, or the latest generated key in the startup logs.",
+      "registrationRequired": "The operator must create the first administrator on the setup page before registration opens.",
       "needUser": "Create the first account"
     }
   },
@@ -484,6 +485,11 @@
   },
   "validation": {
     "fields": {
+      "boot_key": {
+        "required": "The boot key is required",
+        "min": "The boot key must be at least {count} characters",
+        "max": "The boot key must be at most {count} characters"
+      },
       "email": {
         "required": "Email address is required",
         "email": "Email address is not valid",

@@ -11,6 +11,8 @@ import { createPinia, setActivePinia } from 'pinia';
 import { flushPromises } from '@vue/test-utils';
 
 import { mountWithI18n } from '@/test/harness';
+import en from '@/locales/en.json';
+import fr from '@/locales/fr.json';
 
 /**
  * The regression this file guards: on a *failed* `/auth/status` read the store
@@ -59,6 +61,7 @@ vi.mock('@/api/client', () => ({ apiClient }));
 // API modules.
 const { useAuthStore } = await import('@/stores/auth');
 const { default: Bootstrap } = await import('./Bootstrap.vue');
+const { default: Register } = await import('./Register.vue');
 
 describe('Bootstrap.vue', () => {
   beforeEach(() => {
@@ -100,6 +103,79 @@ describe('Bootstrap.vue', () => {
   });
 
   describe('submit', () => {
+    async function submitKey(key: string, locale: 'en' | 'fr' = 'en') {
+      const wrapper = mountWithI18n(Bootstrap, {}, locale);
+      await wrapper.find('#boot_key').setValue(key);
+      await wrapper.find('#display_name').setValue('Owner');
+      await wrapper.find('#email').setValue('owner@example.test');
+      await wrapper.find('#password').setValue('Str0ng!Passw0rd');
+      await wrapper.find('form').trigger('submit');
+      await flushPromises();
+      return wrapper;
+    }
+
+    it.each(['en', 'fr'] as const)('validates boot-key code-point bounds in %s', async locale => {
+      for (const key of ['', 'a'.repeat(15), '🔑'.repeat(15), 'a'.repeat(257), '🔑'.repeat(257)]) {
+        const wrapper = await submitKey(key, locale);
+        expect(authApi.bootstrap).not.toHaveBeenCalled();
+        expect(wrapper.find('.input-error').exists()).toBe(true);
+        expect(wrapper.text()).not.toContain('validation.fields.');
+        wrapper.unmount();
+      }
+    });
+
+    it.each(['a'.repeat(16), '🔑'.repeat(16), 'a'.repeat(256), '🔑'.repeat(256)])(
+      'accepts valid Unicode boot-key boundaries',
+      async key => {
+        authApi.bootstrap.mockRejectedValue({ code: 'UNAUTHORIZED' });
+        await submitKey(key);
+        expect(authApi.bootstrap).toHaveBeenCalledTimes(1);
+      }
+    );
+
+    it.each(['en', 'fr'] as const)('translates server boot-key validation in %s', async locale => {
+      authApi.bootstrap.mockRejectedValue({
+        code: 'VALIDATION_ERROR',
+        details: [{ field: 'boot_key', message: 'must be at least 16 characters' }],
+      });
+      const wrapper = await submitKey('operator-key-1234567890', locale);
+      const messages = locale === 'en' ? en : fr;
+      expect(wrapper.text()).toContain(
+        messages.validation.fields.boot_key.min.replace('{count}', '16')
+      );
+    });
+
+    it.each(['en', 'fr'] as const)(
+      'keeps the configured message and login action visible in %s',
+      async locale => {
+        authApi.bootstrap.mockRejectedValue({ code: 'CONFLICT' });
+        const wrapper = await submitKey('operator-key-1234567890', locale);
+        const messages = locale === 'en' ? en : fr;
+        expect(wrapper.find('[role="alert"]').text()).toContain(
+          messages.auth.bootstrap.alreadyConfigured
+        );
+        expect(wrapper.find('[to="/login"]').exists()).toBe(true);
+        expect(wrapper.find('form').exists()).toBe(false);
+        expect(routerReplace).not.toHaveBeenCalled();
+        expect(useAuthStore().bootstrapStatusKnown).toBe(true);
+        expect(useAuthStore().bootstrapRequired).toBe(false);
+      }
+    );
+
+    it.each([
+      ['UNAUTHORIZED', en.auth.bootstrap.invalidKey],
+      ['INTERNAL_ERROR', en.errors.serverError],
+      ['TOO_MANY_REQUESTS', en.errors.rateLimited],
+      ['SERVICE_UNAVAILABLE', en.errors.serviceUnavailable],
+      ['ERR_NETWORK', en.errors.network],
+      ['UNMAPPED_ERROR', en.errors.generic],
+    ])('shows an accurate message for %s', async (code, message) => {
+      authApi.bootstrap.mockRejectedValue({ code });
+      const wrapper = await submitKey('operator-key-1234567890');
+      expect(wrapper.find('[role="alert"]').text()).toBe(message);
+      expect(routerReplace).not.toHaveBeenCalled();
+    });
+
     it('creates the first user and navigates to the dashboard', async () => {
       authApi.bootstrap.mockResolvedValue({
         user: { id: 'u-1', email: 'owner@example.test', display_name: 'Owner' },
@@ -192,5 +268,31 @@ describe('Bootstrap.vue', () => {
         expect(routerPush).toHaveBeenCalledWith('/dashboard');
       });
     });
+  });
+});
+
+describe('Register.vue bootstrap recovery', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setActivePinia(createPinia());
+  });
+
+  it.each(['en', 'fr'] as const)('offers setup after a failed status probe in %s', async locale => {
+    const store = useAuthStore();
+    store.bootstrapStatusKnown = false;
+    authApi.register.mockRejectedValue({ code: 'BOOTSTRAP_REQUIRED' });
+    const wrapper = mountWithI18n(Register, {}, locale);
+    await wrapper.find('#display_name').setValue('Owner');
+    await wrapper.find('#email').setValue('owner@example.test');
+    await wrapper.find('#password').setValue('Str0ng!Passw0rd');
+    await wrapper.find('form').trigger('submit');
+    await flushPromises();
+    expect(wrapper.text()).toContain(
+      (locale === 'en' ? en : fr).auth.bootstrap.registrationRequired
+    );
+    expect(wrapper.find('[to="/bootstrap"]').exists()).toBe(true);
+    expect(store.bootstrapStatusKnown).toBe(true);
+    expect(store.bootstrapRequired).toBe(true);
+    expect(routerPush).not.toHaveBeenCalled();
   });
 });

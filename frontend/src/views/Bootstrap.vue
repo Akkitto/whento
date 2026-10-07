@@ -23,13 +23,17 @@
         <!-- Error Message -->
         <div
           v-if="error"
+          role="alert"
           class="mb-6 rounded-lg border border-danger-200 bg-danger-50 p-4 text-sm text-danger-800 dark:border-danger-800 dark:bg-danger-900/20 dark:text-danger-400"
         >
           {{ error }}
+          <router-link v-if="bootstrapClosed" to="/login" class="mt-2 block font-medium underline">
+            {{ t('auth.loginButton') }}
+          </router-link>
         </div>
 
         <!-- Form -->
-        <form class="space-y-6" @submit.prevent="handleSubmit">
+        <form v-if="!bootstrapClosed" class="space-y-6" @submit.prevent="handleSubmit">
           <!-- Boot key -->
           <div>
             <label for="boot_key" class="block">
@@ -194,9 +198,10 @@ const errors = reactive({
 
 const error = ref('');
 const loading = ref(false);
+const bootstrapClosed = ref(false);
 
 // When the instance is no longer unconfigured — a bootstrap or a racing first
-// registration that this tab has actually *seen* complete — this page has
+// legacy account creation that this tab has actually *seen* complete — this page has
 // nothing left to do. The router guard owns navigation on capability state: it
 // only redirects away from /bootstrap once a real /auth/status answer says the
 // instance is configured (bootstrapStatusKnown && !bootstrapRequired). Mirroring
@@ -218,7 +223,13 @@ function validateForm(): boolean {
   let isValid = true;
 
   if (!form.boot_key) {
-    errors.boot_key = t('errors.required');
+    errors.boot_key = t('validation.fields.boot_key.required');
+    isValid = false;
+  } else if (Array.from(form.boot_key).length < 16) {
+    errors.boot_key = t('validation.fields.boot_key.min', { count: 16 });
+    isValid = false;
+  } else if (Array.from(form.boot_key).length > 256) {
+    errors.boot_key = t('validation.fields.boot_key.max', { count: 256 });
     isValid = false;
   }
 
@@ -300,10 +311,13 @@ async function handleSubmit() {
     if (apiError.code === 'CONFLICT') {
       error.value = t('auth.bootstrap.alreadyConfigured');
       authStore.bootstrapRequired = false; // reflected by the guard next nav
-      router.replace('/login');
+      authStore.bootstrapStatusKnown = true;
+      bootstrapClosed.value = true;
+      form.boot_key = '';
+      form.password = '';
       return;
     }
-    error.value = t(translateErrorMessage(apiError, { fallback: 'auth.bootstrap.invalidKey' }));
+    error.value = t(translateErrorMessage(apiError));
   } finally {
     loading.value = false;
   }
