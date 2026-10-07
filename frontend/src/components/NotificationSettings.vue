@@ -64,12 +64,13 @@
           </h4>
           <div class="space-y-4">
             <!-- Email -->
-            <div v-if="emailOptionVisible">
+            <div>
               <label for="channel-email" class="flex items-center">
                 <input
                   id="channel-email"
                   v-model="localConfig.channels.email.enabled"
                   type="checkbox"
+                  :disabled="smtpProbe === 'unavailable' && !localConfig.channels.email.enabled"
                   class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
                 />
                 <span class="ml-2 text-sm text-gray-700 dark:text-gray-300">
@@ -261,7 +262,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { getDefaultNotifyConfig, type NotifyConfig } from '@/api/notify';
 import type { SmtpProbeState } from '@/utils/smtpProbe';
@@ -289,11 +290,8 @@ const { t } = useI18n();
 const localConfig = ref<NotifyConfig>(getDefaultNotifyConfig());
 const saving = ref(false);
 
-// Keep saved consent visible so it can be explicitly revoked during an outage.
-// A confirmed outage hides new opt-ins, but never rewrites the saved preference.
-const emailOptionVisible = computed(
-  () => props.smtpProbe !== 'unavailable' || localConfig.value.channels.email.enabled
-);
+// Saved consent stays editable for explicit revocation; only new opt-ins are
+// disabled during a confirmed SMTP outage. Capability never rewrites consent.
 
 // Initialize local config from props - only on mount and when prop changes externally
 let isInternalUpdate = false;

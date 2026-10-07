@@ -275,7 +275,7 @@ import {
   prepareWeekdayTimes,
 } from '@/utils/calendar/weekdayTimes';
 import { getDefaultNotifyConfig, updateNotifyConfig, type NotifyConfig } from '@/api/notify';
-import { applySmtpProbeToConfig, useSmtpProbe } from '@/utils/smtpProbe';
+import { useSmtpProbe } from '@/utils/smtpProbe';
 import { translateErrorMessage } from '@/utils/errorTranslator';
 
 const router = useRouter();
@@ -439,10 +439,7 @@ async function handleSubmit() {
     if (notifyConfig.value.enabled) {
       try {
         // SMTP capability gates delivery, never the owner's saved preference.
-        await updateNotifyConfig(
-          calendar.id,
-          applySmtpProbeToConfig(notifyConfig.value, smtpProbe.value)
-        );
+        await updateNotifyConfig(calendar.id, notifyConfig.value);
       } catch {
         // The calendar itself exists; only its notification settings did not take.
         // Say so, and still send the user to the settings page to retry there,

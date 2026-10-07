@@ -605,7 +605,7 @@ import CalendarThresholdFields from '@/components/calendar/CalendarThresholdFiel
 import CalendarScheduleFields from '@/components/calendar/CalendarScheduleFields.vue';
 import ParticipantAccessToggles from '@/components/calendar/ParticipantAccessToggles.vue';
 import { translateErrorMessage } from '@/utils/errorTranslator';
-import { applySmtpProbeToConfig, useSmtpProbe } from '@/utils/smtpProbe';
+import { useSmtpProbe } from '@/utils/smtpProbe';
 import {
   createEmptyWeekdayTimes,
   normalizeTime,
@@ -908,7 +908,7 @@ async function handleUpdate() {
 async function handleSaveNotifications(config: NotifyConfig) {
   try {
     // SMTP capability controls delivery and the UI, not the owner's saved choice.
-    await updateNotifyConfig(calendarId, applySmtpProbeToConfig(config, smtpProbe.value));
+    await updateNotifyConfig(calendarId, config);
     toastStore.success(t('calendar.settingsSaved'));
   } catch (error: any) {
     toastStore.error(t(translateErrorMessage(error, { fallback: 'notifications.saveError' })));

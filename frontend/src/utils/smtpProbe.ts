@@ -7,7 +7,6 @@
 import { ref } from 'vue';
 
 import { authApi } from '@/api/auth';
-import type { NotifyConfig } from '@/api/notify';
 
 /**
  * The SMTP capability probe is deliberately not a boolean. Whether the email
@@ -50,20 +49,4 @@ export function useSmtpProbe() {
   };
 
   return { state, probe };
-}
-
-/**
- * Returns the config that should actually be persisted for the given probe
- * outcome. All capability outcomes preserve the owner's edit, so an unrelated
- * settings save cannot silently clobber email.enabled during an SMTP outage.
- */
-export function applySmtpProbeToConfig(
-  config: NotifyConfig,
-  _probeState: SmtpProbeState
-): NotifyConfig {
-  const next: NotifyConfig = {
-    ...config,
-    channels: { ...config.channels, email: { ...config.channels.email } },
-  };
-  return next;
 }

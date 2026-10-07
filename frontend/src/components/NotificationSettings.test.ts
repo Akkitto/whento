@@ -21,6 +21,7 @@ describe('NotificationSettings SMTP consent', () => {
     const checkbox = wrapper.find('#channel-email');
     expect(checkbox.exists()).toBe(true);
     expect((checkbox.element as HTMLInputElement).checked).toBe(true);
+    expect((checkbox.element as HTMLInputElement).disabled).toBe(false);
     await checkbox.setValue(false);
     expect(lastEmit(wrapper, 'update:modelValue')?.[0]).toMatchObject({
       channels: { email: { enabled: false } },
@@ -36,7 +37,19 @@ describe('NotificationSettings SMTP consent', () => {
     const wrapper = mountWithI18n(NotificationSettings, {
       props: { modelValue: config, smtpProbe: 'unavailable' },
     });
-    expect(wrapper.find('#channel-email').exists()).toBe(false);
+    expect((wrapper.find('#channel-email').element as HTMLInputElement).disabled).toBe(true);
+    wrapper.unmount();
+  });
+
+  it.each(['en', 'fr'] as const)('explains the calendar-local midnight anchor in %s', locale => {
+    const config = getDefaultNotifyConfig();
+    config.enabled = true;
+    config.reminders.enabled = true;
+    const wrapper = mountWithI18n(NotificationSettings, { props: { modelValue: config } }, locale);
+    expect(wrapper.text()).toContain(locale === 'en' ? 'midnight at the start' : 'minuit au début');
+    expect(wrapper.text()).toContain(
+      locale === 'en' ? "calendar's time zone" : 'fuseau horaire du calendrier'
+    );
     wrapper.unmount();
   });
 });

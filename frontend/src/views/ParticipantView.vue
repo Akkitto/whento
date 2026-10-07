@@ -75,13 +75,16 @@
           </button>
         </div>
 
-        <!-- Email Notification Section (if the calendar allows participant mail AND this instance can send email) -->
+        <!-- Capability warnings never hide an address already on file. -->
         <ParticipantEmailPanel
           v-if="emailPanelVisible"
           :token="token"
           :participant-id="participantId"
           :email="participant.email"
           :email-verified="participant.email_verified"
+          :smtp-probe="smtpProbeState"
+          :email-allowed="notificationsEnabled"
+          @retry-smtp-probe="probeSmtp"
         />
 
         <!-- Calendar View -->
@@ -310,13 +313,10 @@ const participant = computed(() => {
 
 const notificationsEnabled = computed(() => calendar.value?.notify_participants === true);
 
-// Whether the instance has SMTP configured. The participant-email gate is the
-// calendar's policy *and* this capability: without mail the panel would offer a
-// form whose sends could never leave the server (and the backend now refuses).
-// A failed probe hides the panel too — the safe answer for a form that sends.
+// Keep existing email status visible; only available SMTP enables sending.
 const { state: smtpProbeState, probe: probeSmtp } = useSmtpProbe();
 const emailPanelVisible = computed(
-  () => notificationsEnabled.value && smtpProbeState.value === 'available'
+  () => notificationsEnabled.value || Boolean(participant.value?.email)
 );
 // How the calendar is drawn, and the persistence of that choice. Only the two settings
 // that move the visible date range refetch; the week's hours and slot size do not.

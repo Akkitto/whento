@@ -10,8 +10,25 @@
       {{ t('notifications.emailVerification') }}
     </h3>
 
+    <div v-if="!canSend" class="mb-4 text-sm" role="status">
+      <span v-if="!emailAllowed">{{ t('notifications.participantEmailDisabled') }}</span>
+      <span v-else-if="smtpProbe === 'unavailable'">{{
+        t('notifications.smtpNotConfigured')
+      }}</span>
+      <span v-else-if="smtpProbe === 'error'">{{ t('notifications.smtpProbeFailed') }}</span>
+      <span v-else>{{ t('common.loading') }}</span>
+      <button
+        v-if="emailAllowed && (smtpProbe === 'error' || smtpProbe === 'unavailable')"
+        type="button"
+        class="btn btn-ghost ml-3"
+        @click="$emit('retry-smtp-probe')"
+      >
+        {{ t('common.retry') }}
+      </button>
+    </div>
+
     <!-- No email added yet -->
-    <div v-if="!email">
+    <div v-if="!email && canSend">
       <p class="mb-4 text-sm text-gray-600 dark:text-gray-400">
         {{ t('notifications.addEmail') }}
       </p>
@@ -46,7 +63,7 @@
     </div>
 
     <!-- Email pending verification -->
-    <div v-else-if="!emailVerified" class="space-y-3">
+    <div v-else-if="email && !emailVerified" class="space-y-3">
       <div v-if="!changingEmail" class="space-y-3">
         <div class="rounded-lg bg-orange-50 p-4 dark:bg-orange-900/20">
           <div class="flex">
@@ -71,12 +88,12 @@
         <div class="flex gap-2">
           <button
             class="btn btn-ghost"
-            :disabled="resendingEmail"
+            :disabled="resendingEmail || !canSend"
             @click="handleResendVerification"
           >
             {{ resendingEmail ? t('common.sending') : t('notifications.resendVerification') }}
           </button>
-          <button class="btn btn-ghost" @click="changingEmail = true">
+          <button class="btn btn-ghost" :disabled="!canSend" @click="changingEmail = true">
             {{ t('notifications.changeEmail') }}
           </button>
         </div>
@@ -84,7 +101,7 @@
 
       <!-- Change email form -->
       <ParticipantEmailChangeForm
-        v-else
+        v-else-if="canSend"
         v-model="newEmailInput"
         :current-email="email"
         :saving="addingEmail"
@@ -94,7 +111,7 @@
     </div>
 
     <!-- Email verified -->
-    <div v-else class="space-y-3">
+    <div v-else-if="email" class="space-y-3">
       <div v-if="!changingEmail" class="space-y-3">
         <div class="rounded-lg bg-success-50 p-4 dark:bg-success-900/20">
           <div class="flex">
@@ -116,14 +133,14 @@
             </p>
           </div>
         </div>
-        <button class="btn btn-ghost" @click="changingEmail = true">
+        <button class="btn btn-ghost" :disabled="!canSend" @click="changingEmail = true">
           {{ t('notifications.changeEmail') }}
         </button>
       </div>
 
       <!-- Change email form -->
       <ParticipantEmailChangeForm
-        v-else
+        v-else-if="canSend"
         v-model="newEmailInput"
         :current-email="email"
         :saving="addingEmail"
@@ -149,22 +166,30 @@
  * through the parent would either duplicate the store call or make the save spinner stop
  * before the new state is known.
  */
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useCalendarStore } from '@/stores/calendar';
 import { useToastStore } from '@/stores/toast';
 import { addParticipantEmail, resendVerificationEmail } from '@/api/notify';
 import ParticipantEmailChangeForm from './ParticipantEmailChangeForm.vue';
 import { translateErrorMessage } from '@/utils/errorTranslator';
+import type { SmtpProbeState } from '@/utils/smtpProbe';
 
-const props = defineProps<{
-  /** The calendar's public token. */
-  token: string;
-  participantId: string;
-  /** The address currently on file, if any. */
-  email?: string;
-  emailVerified?: boolean;
-}>();
+const props = withDefaults(
+  defineProps<{
+    /** The calendar's public token. */
+    token: string;
+    participantId: string;
+    /** The address currently on file, if any. */
+    email?: string;
+    emailVerified?: boolean;
+    smtpProbe?: SmtpProbeState;
+    emailAllowed?: boolean;
+  }>(),
+  { smtpProbe: 'unknown', emailAllowed: true }
+);
+
+defineEmits<{ 'retry-smtp-probe': [] }>();
 
 const { t } = useI18n();
 const calendarStore = useCalendarStore();
@@ -175,9 +200,10 @@ const newEmailInput = ref('');
 const addingEmail = ref(false);
 const resendingEmail = ref(false);
 const changingEmail = ref(false);
+const canSend = computed(() => props.emailAllowed && props.smtpProbe === 'available');
 
 async function handleAddEmail() {
-  if (!emailInput.value.trim() || !props.token || !props.participantId) {
+  if (!canSend.value || !emailInput.value.trim() || !props.token || !props.participantId) {
     return;
   }
 
@@ -197,7 +223,7 @@ async function handleAddEmail() {
 }
 
 async function handleResendVerification() {
-  if (!props.token || !props.participantId) {
+  if (!canSend.value || !props.token || !props.participantId) {
     return;
   }
 
@@ -214,7 +240,7 @@ async function handleResendVerification() {
 }
 
 async function handleChangeEmail() {
-  if (!newEmailInput.value.trim() || !props.token || !props.participantId) {
+  if (!canSend.value || !newEmailInput.value.trim() || !props.token || !props.participantId) {
     return;
   }
 

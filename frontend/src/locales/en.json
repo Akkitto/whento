@@ -799,7 +799,7 @@
     "reminders": "Reminders",
     "enableReminders": "Send reminder notifications before events",
     "hoursBefore": "Hours before event",
-    "hoursBeforeHelp": "Send reminder N hours before the event (1-168 hours)",
+    "hoursBeforeHelp": "Send a reminder 1–168 hours before midnight at the start of the event date, in the calendar's time zone. For example, 1 hour means 23:00 on the previous day; 24 hours means midnight on the previous day.",
     "emailVerification": "Email Verification",
     "addEmail": "Add email to receive notifications",
     "emailPlaceholder": "email{'@'}example.com",
@@ -820,7 +820,8 @@
     "tokenExpired": "The verification link has expired. Please request a new one.",
     "verificationError": "An error occurred during verification. Please try again.",
     "saveError": "Failed to save notification settings",
-    "smtpProbeFailed": "Could not verify email availability. Retry to re-check."
+    "smtpProbeFailed": "Could not verify email availability. Retry to re-check.",
+    "participantEmailDisabled": "The calendar owner has disabled participant email notifications."
   },
   "unifiedFeed": {
     "title": "Unified ICS Feed",

@@ -799,7 +799,7 @@
     "reminders": "Rappels",
     "enableReminders": "Envoyer des rappels avant les événements",
     "hoursBefore": "Heures avant l'événement",
-    "hoursBeforeHelp": "Envoyer un rappel N heures avant l'événement (1-168 heures)",
+    "hoursBeforeHelp": "Envoyer un rappel 1 à 168 heures avant minuit au début de la date de l'événement, dans le fuseau horaire du calendrier. Par exemple, 1 heure signifie 23 h la veille ; 24 heures signifie minuit la veille.",
     "emailVerification": "Vérification d'email",
     "addEmail": "Ajouter un email pour recevoir les notifications",
     "emailPlaceholder": "email{'@'}example.com",
@@ -820,7 +820,8 @@
     "tokenExpired": "Le lien de vérification a expiré. Veuillez en demander un nouveau.",
     "verificationError": "Une erreur s'est produite lors de la vérification. Veuillez réessayer.",
     "saveError": "Échec de l'enregistrement des paramètres de notification",
-    "smtpProbeFailed": "Impossible de vérifier la disponibilité de l'e-mail. Réessayez pour vérifier à nouveau."
+    "smtpProbeFailed": "Impossible de vérifier la disponibilité de l'e-mail. Réessayez pour vérifier à nouveau.",
+    "participantEmailDisabled": "Le propriétaire du calendrier a désactivé les notifications par e-mail aux participants."
   },
   "unifiedFeed": {
     "title": "Flux ICS unifié",
