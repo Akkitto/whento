@@ -237,9 +237,29 @@ func (r *ReminderJobRepository) RecordMissed(ctx context.Context, job *models.Re
 	return tag.RowsAffected() > 0, nil
 }
 
-// Cleanup bounds queue retention without removing future-event tombstones or
-// live claims. Abandoned pending jobs for long-past events are also expired.
+// Cleanup scrubs legacy provider error strings and bounds queue retention without
+// removing future-event tombstones or live claims. At most limit rows are touched
+// per pass; a full batch tells the scheduler to continue on its next pass.
 func (r *ReminderJobRepository) Cleanup(ctx context.Context, before time.Time, limit int) (int64, error) {
+	if limit <= 0 {
+		return 0, nil
+	}
+	scrubbed, err := r.pool.Exec(ctx, `
+		UPDATE reminder_jobs SET last_error = CASE WHEN status = 'sent' THEN NULL ELSE 'reminder_internal_failure' END
+		WHERE id IN (
+			SELECT id FROM reminder_jobs WHERE last_error IS NOT NULL
+			  AND (status = 'sent' OR last_error NOT IN (
+				'email_delivery_failed', 'discord_delivery_failed', 'slack_delivery_failed',
+				'telegram_delivery_failed', 'reminder_internal_failure', 'catch_up_window_missed'))
+			ORDER BY updated_at, id LIMIT $1 FOR UPDATE SKIP LOCKED
+		)`, limit)
+	if err != nil {
+		return 0, fmt.Errorf("failed to scrub reminder errors: %w", err)
+	}
+	changed := scrubbed.RowsAffected()
+	if changed >= int64(limit) {
+		return changed, nil
+	}
 	tag, err := r.pool.Exec(ctx, `
 		DELETE FROM reminder_jobs WHERE id IN (
 			SELECT id FROM reminder_jobs
@@ -247,11 +267,11 @@ func (r *ReminderJobRepository) Cleanup(ctx context.Context, before time.Time, l
 			  AND (lease_until IS NULL OR lease_until < now())
 			ORDER BY event_date, id LIMIT $2
 			FOR UPDATE SKIP LOCKED
-		)`, before.UTC(), limit)
+	)`, before.UTC(), int64(limit)-changed)
 	if err != nil {
 		return 0, fmt.Errorf("failed to clean reminder jobs: %w", err)
 	}
-	return tag.RowsAffected(), nil
+	return changed + tag.RowsAffected(), nil
 }
 
 // MarkFailed records a delivery failure and schedules the next attempt, or

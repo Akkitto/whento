@@ -187,6 +187,7 @@ line per release rather than listed individually.
   A bouncing participant no longer makes successful recipients receive another
   reminder after the threshold ledger's one-hour anti-spam window. Lease renewal
   cannot shorten a live claim. Successful delivery clears previous error metadata.
+  Bounded cleanup also scrubs legacy free-form provider errors in retained rows.
 - **Reminder state has bounded retention and missed-window visibility.** Jobs and
   recipient completion are cleaned in bounded batches after the event and state
   are more than 30 days old. Missed windows are recorded and warned once per

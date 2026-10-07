@@ -204,3 +204,36 @@ func TestReminderRecipientDedupOutlivesHourAndRetentionProtectsFutureDate(t *tes
 		t.Fatalf("old reminder completion was not cleaned: %d, %v", deleted, err)
 	}
 }
+
+func TestReminderCleanupScrubsLegacySecretsWithoutExtendingRetention(t *testing.T) {
+	pool := dbtest.Pool(t)
+	ctx := dbtest.Context(t)
+	repo := repository.NewReminderJobRepository(pool)
+	for _, status := range []string{"pending", "sent", "failed", "canceled"} {
+		job := newReminderJob(t, pool)
+		if err := repo.Enqueue(ctx, job); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `UPDATE reminder_jobs SET status = $2,
+			last_error = 'Post https://provider.test/SECRET-TOKEN: DNS failure', updated_at = now() - interval '2 days'
+			WHERE calendar_id = $1`, job.CalendarID, status); err != nil {
+			t.Fatal(err)
+		}
+		changed, err := repo.Cleanup(ctx, time.Now().Add(-30*24*time.Hour), 1)
+		if err != nil || changed != 1 {
+			t.Fatalf("legacy scrub for %s: %d, %v", status, changed, err)
+		}
+		var reason string
+		var oldTimestamp bool
+		if err := pool.QueryRow(ctx, `SELECT COALESCE(last_error, ''), updated_at < now() - interval '1 day' FROM reminder_jobs WHERE calendar_id = $1`, job.CalendarID).Scan(&reason, &oldTimestamp); err != nil {
+			t.Fatal(err)
+		}
+		want := "reminder_internal_failure"
+		if status == "sent" {
+			want = ""
+		}
+		if reason != want || !oldTimestamp {
+			t.Fatalf("legacy state for %s: %q, unchanged time=%v", status, reason, oldTimestamp)
+		}
+	}
+}

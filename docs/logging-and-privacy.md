@@ -358,7 +358,9 @@ The scheduler automatically removes old reminder jobs and reminder completion
 records once both their event date and last update/send are more than 30 days old.
 Cleanup is bounded to 1,000 rows per table per pass, drains an existing backlog on
 subsequent passes, and otherwise runs daily. Future-event records and live claims
-are retained. Calendar deletion cascades immediately to both tables. Backups and
+are retained. Queue cleanup also scrubs legacy free-form errors in retained rows
+to a safe category (or clears them for already-sent jobs), without extending their
+retention timestamps. Calendar deletion cascades immediately to both tables. Backups and
 application logs remain subject to the operator's own retention policy; upgrading
 cannot remove secrets already present in historical backups or logs.
 
