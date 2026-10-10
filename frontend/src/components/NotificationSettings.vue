@@ -64,12 +64,13 @@
           </h4>
           <div class="space-y-4">
             <!-- Email -->
-            <div v-if="smtpConfigured">
+            <div>
               <label for="channel-email" class="flex items-center">
                 <input
                   id="channel-email"
                   v-model="localConfig.channels.email.enabled"
                   type="checkbox"
+                  :disabled="smtpProbe === 'unavailable' && !localConfig.channels.email.enabled"
                   class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
                 />
                 <span class="ml-2 text-sm text-gray-700 dark:text-gray-300">
@@ -78,10 +79,22 @@
               </label>
             </div>
             <div
-              v-else
+              v-if="smtpProbe === 'unavailable'"
               class="rounded-md bg-gray-50 p-3 text-sm text-gray-600 dark:bg-gray-800 dark:text-gray-400"
             >
               {{ t('notifications.smtpNotConfigured') }}
+            </div>
+
+            <!-- A failed probe is a retryable warning, never a reason to destroy
+                 the owner's saved email.enabled setting. -->
+            <div
+              v-if="smtpProbe === 'error'"
+              class="flex items-center justify-between rounded-md bg-orange-50 p-3 text-sm text-orange-700 dark:bg-orange-900/20 dark:text-orange-300"
+            >
+              <span>{{ t('notifications.smtpProbeFailed') }}</span>
+              <button type="button" class="btn btn-ghost ml-3" @click="$emit('retry-smtp-probe')">
+                {{ t('common.retry') }}
+              </button>
             </div>
 
             <!-- Discord -->
@@ -252,15 +265,17 @@
 import { ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { getDefaultNotifyConfig, type NotifyConfig } from '@/api/notify';
+import type { SmtpProbeState } from '@/utils/smtpProbe';
 import CollapsibleSection from '@/components/CollapsibleSection.vue';
 
 const props = withDefaults(
   defineProps<{
     modelValue: NotifyConfig;
-    smtpConfigured?: boolean;
+    smtpProbe?: SmtpProbeState;
     showSaveButton?: boolean;
   }>(),
   {
+    smtpProbe: 'unknown',
     showSaveButton: true,
   }
 );
@@ -268,11 +283,15 @@ const props = withDefaults(
 const emit = defineEmits<{
   'update:modelValue': [value: NotifyConfig];
   save: [value: NotifyConfig];
+  'retry-smtp-probe': [];
 }>();
 
 const { t } = useI18n();
 const localConfig = ref<NotifyConfig>(getDefaultNotifyConfig());
 const saving = ref(false);
+
+// Saved consent stays editable for explicit revocation; only new opt-ins are
+// disabled during a confirmed SMTP outage. Capability never rewrites consent.
 
 // Initialize local config from props - only on mount and when prop changes externally
 let isInternalUpdate = false;

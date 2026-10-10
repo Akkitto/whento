@@ -229,7 +229,7 @@ func (e *ExternalNotifier) SendDiscord(
 		return fmt.Errorf("discord webhook returned status %d", resp.StatusCode)
 	}
 
-	e.logger.Info("Discord notification sent successfully", "webhook", webhookURL[:20]+"...")
+	e.logger.Info("Discord notification sent successfully", "webhook_ref", pkglog.Fingerprint(webhookURL))
 	return nil
 }
 
@@ -278,7 +278,7 @@ func (e *ExternalNotifier) SendSlack(
 		return fmt.Errorf("slack webhook returned status %d", resp.StatusCode)
 	}
 
-	e.logger.Info("Slack notification sent successfully", "webhook", webhookURL[:20]+"...")
+	e.logger.Info("Slack notification sent successfully", "webhook_ref", pkglog.Fingerprint(webhookURL))
 	return nil
 }
 

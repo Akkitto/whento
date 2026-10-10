@@ -54,6 +54,13 @@ line per release rather than listed individually.
 - Durable, migration-backed pending-MFA nonce consumption and refresh-session
   families with per-user advisory locking, so concurrent refresh rotations and
   a logout cannot lose each other.
+- A reminder scheduler (`internal/notify/service`) wired into `cmd` that issues,
+  claims and delivers persisted reminder jobs, re-arms canceled deliveries
+  within the catch-up window once availability/config return, and renews its
+  claim lease immediately before each bounded external send. The operator tunables are
+  exposed as `REMINDER_HOURS_BEFORE`, `REMINDER_INTERVAL`,
+  `REMINDER_CATCH_UP_WINDOW`, `REMINDER_MAX_ATTEMPTS` and
+  `REMINDER_RETRY_BACKOFF`.
 
 ### Changed
 
@@ -131,7 +138,69 @@ line per release rather than listed individually.
   created") carry the request id, and the startup message names
   `BOOTSTRAP_KEY_FILE` as well as `BOOTSTRAP_KEY` as the key's source.
 
----
+- **Reminder delivery is a durable, fenced queue.** Reminders are persisted in
+  a `reminder_jobs` table (migration `020`) and delivered by a scheduler loop:
+  each job is claimed atomically under a per-acquisition UUID claim token and a
+  lease (`FOR UPDATE SKIP LOCKED`), so only one worker owns an unexpired claim.
+  Every queue-state transition is fenced by its token: a late worker's failure report on a job
+  somebody else already sent is a recognizable no-op, and a `sent` row can never
+  be rewritten. Delivery is retried with exponential backoff and permanently
+  fails after `max_attempts`. External delivery remains at least once: a crash
+  after a provider accepts a send but before completion is recorded can cause a
+  retry; exactly-once delivery is not promised.
+- **Reminder deadlines are calendar-local.** The scheduler enumerates candidate
+  event dates in the calendar's own IANA timezone (never a fixed UTC window), so
+  a calendar east of UTC does not lose the day its event lands on, and DST
+  shifts cannot move a scheduled instant onto the wrong date.
+- **Transient errors never cancel an event.** A failed count/availability query
+  while verifying a claimed job retries that job with backoff; only an
+  authoritatively confirmed non-qualifying event cancels the worker's own
+  claim. Each other delivery rechecks eligibility without an unfenced event-wide
+  cancellation. No longer does one bad read silently kill every reminder for an
+  event.
+- **Email is gated on real SMTP, re-read at delivery.** With no mailer
+  configured the scheduler enqueues no email jobs (chat channels are
+  unaffected), and a job whose SMTP vanished before delivery is suppressed
+  rearmably instead of burning its attempt budget. Participant email requires
+  the calendar's full consent configuration *and* SMTP, verified again at
+  delivery time, and the participant-email endpoints refuse when the email
+  channel is off, participant delivery is off, or SMTP is absent.
+- **The frontend SMTP probe preserves saved owner intent.** Instead of a boolean
+  that defaults to “available”, the probe is `unknown | available | unavailable
+  | error`: a failed probe shows a retryable warning. Neither a failed probe nor
+  unavailable SMTP rewrites saved `email.enabled`; only an explicit owner edit
+  changes that preference. Capability still gates delivery and new enablement.
+  Saved consent can be explicitly disabled even while SMTP is unavailable, and
+  stale capability responses cannot overwrite a newer probe result.
+- **Reminder timing and shutdown are bounded.** Rescheduling later cannot retain
+  an earlier claim time; elapsed calendar-local events are not reminded. Retry
+  delays saturate before arithmetic overflow and use each job's stored attempt
+  limit. Invalid operator tunables fail startup instead of silently falling back.
+  Every provider send renews the claim and honors a shorter context deadline,
+  including each recipient in a slow fanout. Lost claims/shutdown stop further
+  sends; chat delivery ledger failures are retried rather than ignored.
+- **Reminder transport errors do not persist provider credentials.** Webhook
+  URLs, bot tokens and recipient addresses embedded in provider errors are not
+  copied into reminder logs or the queue's `last_error`; wrapped error identity
+  remains available for cancellation handling.
+- **Reminder retries retain per-recipient completion for the entire event.**
+  A bouncing participant no longer makes successful recipients receive another
+  reminder after the threshold ledger's one-hour anti-spam window. Lease renewal
+  cannot shorten a live claim. Successful delivery clears previous error metadata.
+  Bounded cleanup also scrubs legacy free-form provider errors in retained rows.
+- **Reminder state has bounded retention and missed-window visibility.** Jobs and
+  recipient completion are cleaned in bounded batches after the event and state
+  are more than 30 days old. Missed windows are recorded and warned once per
+  delivery. Participant emails include localized participation-cancellation links.
+- **Reminder workers are joined before database shutdown.** Canceled SMTP sockets
+  close promptly, while confirmed sends get bounded completion writes before the
+  pool closes. Migration 020 checks valid delivery states and channels, and scans
+  only notification/reminder-enabled calendars through a matching partial index.
+- **Participant email status survives capability-probe failures.** Existing verified
+  or pending addresses remain visible with a warning and retry; sending actions
+  wait for available SMTP and owner consent. The no-op SMTP config adapter is gone.
+  Both locales explain the local-midnight reminder anchor, and participant mail
+  APIs document their consent/capability 403 responses.
 
 ## [v2.0.0] — 2026-08-18
 

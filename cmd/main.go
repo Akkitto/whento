@@ -85,6 +85,19 @@ func main() {
 	}
 }
 
+// instanceID returns a stable-enough identifier for this process, used as the
+// reminder-job owner mark. The hostname is unique among the few instances a
+// self-hosted deployment runs and is readable in the database when an operator
+// is tracing a stuck job. It is an observability label only: the delivery fence
+// is a per-acquisition UUID claim token, not this value.
+func instanceID() string {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		return fmt.Sprintf("pid-%d", os.Getpid())
+	}
+	return host
+}
+
 // shutdownBudget is how long the server is given to finish in-flight requests.
 const shutdownBudget = 10 * time.Second
 
@@ -281,6 +294,7 @@ func run() error {
 		broker:     broker,
 		limiter:    newRouteLimiter(rateLimiter, cfg.RateLimitEnabled),
 		quota:      services,
+		instanceID: instanceID(),
 		cacheProbe: cacheProbe,
 	}
 
@@ -318,6 +332,13 @@ func run() error {
 	baseCtx, baseCancel := context.WithCancel(context.Background())
 	defer baseCancel()
 
+	// Join the worker on every exit path, before closing its database pool.
+	stopReminders := func() {}
+	if h.reminders != nil {
+		stopReminders = startReminderWorker(baseCtx, h.reminders.Run)
+	}
+	defer stopReminders()
+
 	if h.refreshTokens != nil {
 		go sweepExpiredRefreshTokens(baseCtx, h.refreshTokens, log)
 	}
@@ -351,6 +372,7 @@ func run() error {
 	// Graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(quit)
 
 	select {
 	case err := <-serverErr:
@@ -376,12 +398,28 @@ func run() error {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Error("Server forced to shutdown", "error", err)
 	}
+	stopReminders()
 
 	// Structured, like every other line: this process logs JSON, and a bare
 	// Println is a line no log pipeline can parse.
 	log.Info("Server exited")
 
 	return nil
+}
+
+// Cancellation interrupts bounded provider sends; joining keeps the pool alive
+// for the worker's final, independently bounded completion writes.
+func startReminderWorker(parent context.Context, run func(context.Context)) func() {
+	ctx, cancel := context.WithCancel(parent)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		run(ctx)
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
 }
 
 // sweepExpiredRefreshTokens deletes refresh rows whose JWT has expired.

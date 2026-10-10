@@ -15,8 +15,9 @@ it can be re-checked rather than believed.
 
 WhenTo sends nothing anywhere. No analytics, no crash reporting, no phone-home,
 no update check, no vendor SDK. The only outbound connections a self-hosted
-instance makes are to its own PostgreSQL, its own Redis, and the SMTP server you
-configured.
+instance makes are to its own PostgreSQL, its own Redis, the SMTP server you
+configured, and notification providers explicitly enabled by a calendar owner
+(Discord, Slack or Telegram).
 
 Logs are written to **stdout** as structured JSON
 ([`pkg/logger`](../pkg/logger/logger.go), Go's `log/slog`). Where they go from
@@ -337,6 +338,38 @@ The last row is the one people forget. Every verification, magic-link, reset and
 notification email goes through the SMTP provider configured in `SMTP_HOST`, and
 that provider sees recipient addresses and the links themselves. Choose it as
 carefully as you chose where to host the database.
+
+## Reminder queue and recipient completion
+
+`reminder_jobs` persists the calendar UUID, event date, recipient class (`owner`
+or `participants`), channel, schedule, attempt counts, lease/claim metadata and
+delivery/cancellation timestamps. It contains no email address, participant name,
+webhook URL, bot token or public calendar link. `last_error` holds a short category
+only (`email_delivery_failed`, `discord_delivery_failed`, `slack_delivery_failed`,
+`telegram_delivery_failed`, `reminder_internal_failure` or
+`catch_up_window_missed`), and successful delivery clears it.
+
+Per-recipient reminder completion uses `notification_log`: calendar UUID, civil
+event date, recipient UUID/class, channel and send time. Completion does not expire
+after one hour: it remains available throughout retries for that event. The
+one-hour anti-spam rule for threshold-transition notifications is unchanged.
+
+The scheduler automatically removes old reminder jobs and reminder completion
+records once both their event date and last update/send are more than 30 days old.
+Cleanup is bounded to 1,000 rows per table per pass, drains an existing backlog on
+subsequent passes, and otherwise runs daily. Future-event records and live claims
+are retained. Queue cleanup also scrubs legacy free-form errors in retained rows
+to a safe category (or clears them for already-sent jobs), without extending their
+retention timestamps. Calendar deletion cascades immediately to both tables. Backups and
+application logs remain subject to the operator's own retention policy; upgrading
+cannot remove secrets already present in historical backups or logs.
+
+Missed catch-up windows create one canceled row per delivery key and one warning
+when first recorded. The warning includes calendar UUID, event date, schedule and
+channel, never recipient addresses or provider credentials. Participant reminder
+emails include a localized cancellation link for that date, using the same
+participant calendar flow as threshold emails. That link contains a credential and
+must not be copied into logs.
 
 ## No third-party requests from the browser
 

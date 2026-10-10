@@ -96,11 +96,25 @@ func TestSwaggerStillDelegatesTheSpec(t *testing.T) {
 		t.Fatalf("GET /swagger/doc.json = %d, want 200", rec.Code)
 	}
 
-	var spec map[string]any
+	var spec struct {
+		Paths map[string]struct {
+			Post struct {
+				Responses map[string]json.RawMessage `json:"responses"`
+			} `json:"post"`
+		} `json:"paths"`
+	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &spec); err != nil {
 		t.Fatalf("the spec is not JSON: %v", err)
 	}
-	if _, ok := spec["paths"]; !ok {
+	if spec.Paths == nil {
 		t.Error("the spec carries no paths, so it is not the API description")
+	}
+	for _, path := range []string{
+		"/api/v1/calendars/{token}/participants/{pid}/email",
+		"/api/v1/calendars/{token}/participants/{pid}/resend-verification",
+	} {
+		if _, ok := spec.Paths[path].Post.Responses["403"]; !ok {
+			t.Errorf("%s does not document consent/capability refusal", path)
+		}
 	}
 }

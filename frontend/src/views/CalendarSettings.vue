@@ -517,7 +517,8 @@
           <!-- Notifications -->
           <NotificationSettings
             v-model="notifyConfig"
-            :smtp-configured="smtpConfigured"
+            :smtp-probe="smtpProbe"
+            @retry-smtp-probe="probeSmtp"
             @save="handleSaveNotifications"
           />
 
@@ -604,6 +605,7 @@ import CalendarThresholdFields from '@/components/calendar/CalendarThresholdFiel
 import CalendarScheduleFields from '@/components/calendar/CalendarScheduleFields.vue';
 import ParticipantAccessToggles from '@/components/calendar/ParticipantAccessToggles.vue';
 import { translateErrorMessage } from '@/utils/errorTranslator';
+import { useSmtpProbe } from '@/utils/smtpProbe';
 import {
   createEmptyWeekdayTimes,
   normalizeTime,
@@ -677,7 +679,10 @@ const originalForm = reactive({
 
 // Notification config state
 const notifyConfig = ref<NotifyConfig>(getDefaultNotifyConfig());
-const smtpConfigured = ref(true); // TODO: Fetch from backend config
+// Email notification options depend on the instance actually having SMTP
+// configured; the probe is tri-state so a failure is a retryable warning, never
+// a rewrite of the owner's saved email.enabled.
+const { state: smtpProbe, probe: probeSmtp } = useSmtpProbe();
 
 // Track if form has unsaved changes
 const hasUnsavedChanges = computed(() => {
@@ -902,6 +907,7 @@ async function handleUpdate() {
 
 async function handleSaveNotifications(config: NotifyConfig) {
   try {
+    // SMTP capability controls delivery and the UI, not the owner's saved choice.
     await updateNotifyConfig(calendarId, config);
     toastStore.success(t('calendar.settingsSaved'));
   } catch (error: any) {
@@ -1110,6 +1116,9 @@ onBeforeRouteLeave(async (_to, _from, next) => {
 
 onMounted(() => {
   loadCalendar();
+  // Email options follow the instance's actual SMTP configuration. On failure
+  // the probe goes to 'error' (retryable), preserving saved email.enabled.
+  probeSmtp();
   // Add beforeunload listener
   window.addEventListener('beforeunload', handleBeforeUnload);
 });

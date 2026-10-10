@@ -75,13 +75,16 @@
           </button>
         </div>
 
-        <!-- Email Notification Section (if notifications enabled for participants) -->
+        <!-- Capability warnings never hide an address already on file. -->
         <ParticipantEmailPanel
-          v-if="notificationsEnabled"
+          v-if="emailPanelVisible"
           :token="token"
           :participant-id="participantId"
           :email="participant.email"
           :email-verified="participant.email_verified"
+          :smtp-probe="smtpProbeState"
+          :email-allowed="notificationsEnabled"
+          @retry-smtp-probe="probeSmtp"
         />
 
         <!-- Calendar View -->
@@ -252,6 +255,7 @@ import { useParticipantCalendar } from '@/composables/calendar/useParticipantCal
 import { useParticipantDisplaySettings } from '@/composables/calendar/useParticipantDisplaySettings';
 import { useCalendarStream } from '@/composables/calendar/useCalendarStream';
 import { translateErrorMessage } from '@/utils/errorTranslator';
+import { useSmtpProbe } from '@/utils/smtpProbe';
 import type {
   Availability,
   AvailabilityItem,
@@ -309,6 +313,11 @@ const participant = computed(() => {
 
 const notificationsEnabled = computed(() => calendar.value?.notify_participants === true);
 
+// Keep existing email status visible; only available SMTP enables sending.
+const { state: smtpProbeState, probe: probeSmtp } = useSmtpProbe();
+const emailPanelVisible = computed(
+  () => notificationsEnabled.value || Boolean(participant.value?.email)
+);
 // How the calendar is drawn, and the persistence of that choice. Only the two settings
 // that move the visible date range refetch; the week's hours and slot size do not.
 const { displayMode, viewStyle, numberOfPeriods, startHour, endHour, slotDuration, restore } =
@@ -1127,5 +1136,8 @@ onMounted(async () => {
   // Calling loadCalendar() here as well fetched the calendar, its recurrences and the
   // whole range summary a second time on every mount.
   await handleCancelFromEmail();
+
+  // Email capability (read-only; a probe failure simply keeps the panel hidden).
+  probeSmtp();
 });
 </script>

@@ -31,6 +31,7 @@ func newCalendar(t *testing.T, pool *pgxpool.Pool) *calendarModels.Calendar {
 	t.Helper()
 
 	ctx := dbtest.Context(t)
+	dbtest.LockSingletonAccounts(ctx, t, pool)
 	id := uuid.New()
 
 	owner := &authModels.User{
@@ -196,7 +197,7 @@ func TestCleanupKeepsRecentLogs(t *testing.T) {
 	ctx := dbtest.Context(t)
 
 	calendar := newCalendar(t, pool)
-	date := time.Date(2027, 3, 15, 0, 0, 0, 0, time.UTC)
+	date := time.Now().UTC().Add(-40 * 24 * time.Hour)
 	recipient := calendar.OwnerID
 
 	for _, age := range []string{"31 days", "29 days", "1 minute"} {

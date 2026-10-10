@@ -90,6 +90,9 @@ type Config struct {
 	// Email Verification
 	Email EmailConfig
 
+	// Reminders
+	Reminders RemindersConfig
+
 	// WebAuthn (for Passkey authentication)
 	WebAuthnRPName   string
 	WebAuthnRPID     string
@@ -125,6 +128,31 @@ type EmailConfig struct {
 	SMTPPassword        string
 	FromAddress         string
 	FromName            string
+}
+
+// RemindersConfig holds the operator-level tunables of the reminder scheduler:
+// how often it scans for jobs, how far into the past a re-enabled reminder may
+// be rearmed (the catch-up grace), how many send attempts a delivery gets, the
+// base of the retry schedule, and the default lead time a calendar uses when it
+// has not chosen one. Each field is set by a REMINDER_* environment variable,
+// and leaves the per-calendar hours_before setting alone.
+type RemindersConfig struct {
+	// HoursBefore is the lead time in hours used when a calendar has reminders
+	// on but no explicit hours_before, or unset it (REMINDER_HOURS_BEFORE). A
+	// calendar that picked its own hours_before always wins; this is only the
+	// operator's default.
+	HoursBefore int
+	// Interval is the scan cadence of the scheduler loop (REMINDER_INTERVAL).
+	Interval time.Duration
+	// CatchUpWindow is how far into the past a freshly enqueued job may be
+	// (REMINDER_CATCH_UP_WINDOW).
+	CatchUpWindow time.Duration
+	// MaxAttempts bounds send attempts before a delivery is permanently failed
+	// (REMINDER_MAX_ATTEMPTS).
+	MaxAttempts int
+	// RetryBackoff is the base of the exponential retry schedule it is capped at
+	// 24h (REMINDER_RETRY_BACKOFF).
+	RetryBackoff time.Duration
 }
 
 // Load loads configuration from environment variables
@@ -205,6 +233,15 @@ func Load() *Config {
 			SMTPPassword:        l.secret("SMTP_PASSWORD", ""),
 			FromAddress:         getEnv("SMTP_FROM", "contact@whento.be"),
 			FromName:            getEnv("SMTP_FROM_NAME", "Contact WhenTo"),
+		},
+
+		// Reminders
+		Reminders: RemindersConfig{
+			HoursBefore:   l.integer("REMINDER_HOURS_BEFORE", 24),
+			Interval:      l.duration("REMINDER_INTERVAL", 5*time.Minute),
+			CatchUpWindow: l.duration("REMINDER_CATCH_UP_WINDOW", 15*time.Minute),
+			MaxAttempts:   l.integer("REMINDER_MAX_ATTEMPTS", 5),
+			RetryBackoff:  l.duration("REMINDER_RETRY_BACKOFF", 1*time.Minute),
 		},
 
 		// WebAuthn (for Passkey authentication)

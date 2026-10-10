@@ -3288,6 +3288,15 @@ export interface paths {
             'application/json': components['schemas']['httputil.ErrorResponse'];
           };
         };
+        /** @description Forbidden */
+        403: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['httputil.ErrorResponse'];
+          };
+        };
         /** @description Not Found */
         404: {
           headers: {
@@ -3352,6 +3361,15 @@ export interface paths {
         };
         /** @description Bad Request */
         400: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['httputil.ErrorResponse'];
+          };
+        };
+        /** @description Forbidden */
+        403: {
           headers: {
             [name: string]: unknown;
           };

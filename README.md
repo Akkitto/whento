@@ -316,6 +316,13 @@ SMTP_FROM_NAME=WhenTo             # Default: Contact WhenTo
 # Note: TLS mode is determined automatically by the port — there is no
 #       separate TLS toggle variable.
 
+# Durable reminders (optional; calendar hours_before overrides the lead time)
+REMINDER_HOURS_BEFORE=24           # 1–168 hours
+REMINDER_INTERVAL=5m              # Positive; no longer than the catch-up window
+REMINDER_CATCH_UP_WINDOW=15m       # Positive; at most 24h
+REMINDER_MAX_ATTEMPTS=5           # Positive PostgreSQL INTEGER (at most 2147483647)
+REMINDER_RETRY_BACKOFF=1m          # Positive duration; retries saturate at 24h
+
 # Registration & email verification
 EMAIL_VERIFICATION_ENABLED=true   # Default: false
 # EMAIL_VERIFICATION_EXPIRY=24h
@@ -350,6 +357,27 @@ specific to one of them: the only difference is the calendar allowance, which is
 in rather than configured.
 
 ---
+
+### Reminder delivery
+
+Calendar owners enable reminders in notification settings and choose a lead time
+of 1–168 hours before the event date's midnight in the calendar's timezone.
+Only dates meeting the availability threshold qualify. Migration 020 persists
+delivery jobs, so pending work survives restarts; fresh/re-enabled work is only
+issued within the configured catch-up window. Pending retries stop when the
+event's local day begins or its current settings/availability no longer qualify.
+
+Each external send renews its claim and has a deadline shorter than its lease;
+participant fanout renews per recipient. Delivery is **at least once**, not exactly
+once: a provider may accept a send before a crash prevents recording completion.
+Retries use capped exponential backoff and the job's persisted attempt budget.
+Successful jobs are not rearmed by routine scans or settings edits.
+
+Email requires configured SMTP, enabled calendar email delivery, and current owner
+consent; participant recipients must also be verified and available. Losing SMTP
+does not erase saved consent, and owners can still explicitly disable email during
+an outage. Production and devcontainer Compose forward all five `REMINDER_*`
+settings; the host development backend reads them from `.env` directly.
 
 ## 🔧 Architecture
 

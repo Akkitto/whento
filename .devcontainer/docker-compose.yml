@@ -29,6 +29,11 @@ services:
       - GOMODCACHE=/home/vscode/go/pkg/mod
       - GO_ENV=development
       - LOG_LEVEL=debug
+      - REMINDER_HOURS_BEFORE=${REMINDER_HOURS_BEFORE:-24}
+      - REMINDER_INTERVAL=${REMINDER_INTERVAL:-5m}
+      - REMINDER_CATCH_UP_WINDOW=${REMINDER_CATCH_UP_WINDOW:-15m}
+      - REMINDER_MAX_ATTEMPTS=${REMINDER_MAX_ATTEMPTS:-5}
+      - REMINDER_RETRY_BACKOFF=${REMINDER_RETRY_BACKOFF:-1m}
       # Secret-file paths are inside this service; mount the file separately.
       - BOOTSTRAP_KEY=${BOOTSTRAP_KEY:-}
       - BOOTSTRAP_KEY_FILE=${BOOTSTRAP_KEY_FILE:-}
