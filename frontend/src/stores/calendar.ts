@@ -7,6 +7,7 @@
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { calendarsApi } from '@/api/calendars';
+import { useAuthStore } from '@/stores/auth';
 import { useAsyncActions } from '@/stores/asyncAction';
 import type {
   CalendarWithParticipants,
@@ -20,6 +21,18 @@ import type {
 export const useCalendarStore = defineStore('calendar', () => {
   // State
   const calendars = ref<CalendarWithParticipants[]>([]);
+  /**
+   * The user (or anonymous session) whose calendars the `calendars` list currently
+   * holds, or `null` when no *authoritative* list has been loaded for the signed-in
+   * account. Set only on a successful `fetchCalendars`, cleared when the load fails
+   * (the list is emptied either way).
+   *
+   * The dashboard uses this to decide whether pruning saved pins/order against the
+   * in-memory list is safe: an empty list caused by an API failure, a partial list or
+   * a session change must never be treated as "everything was deleted", because that
+   * would erase the account's saved choices on a transient error.
+   */
+  const calendarsForUser = ref<string | null>(null);
   /** The calendar being managed by its owner (or an admin). */
   const currentCalendar = ref<CalendarWithParticipants | null>(null);
   /**
@@ -37,11 +50,17 @@ export const useCalendarStore = defineStore('calendar', () => {
   // Actions
   async function fetchCalendars() {
     return run('calendar.fetchError', async () => {
+      // Bind the response to whoever is signed in when the request starts: the marker
+      // drives the dashboard pruning guard, and a stale stamp would make the dashboard
+      // prune one account's saved order against another's list.
+      const requestingUserId = useAuthStore().user?.id ?? null;
       try {
         const result = await calendarsApi.getAll();
         calendars.value = Array.isArray(result) ? result : [];
+        calendarsForUser.value = requestingUserId;
       } catch (err) {
         calendars.value = []; // Reset to empty array on error
+        calendarsForUser.value = null;
         throw err;
       }
     });
@@ -186,6 +205,7 @@ export const useCalendarStore = defineStore('calendar', () => {
   return {
     // State
     calendars,
+    calendarsForUser,
     currentCalendar,
     currentPublicCalendar,
     loading,

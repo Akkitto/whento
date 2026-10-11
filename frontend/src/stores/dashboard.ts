@@ -1,0 +1,246 @@
+/*
+ * WhenTo - Collaborative event calendar for self-hosted environments
+ * Copyright (C) 2025 WhenTo Contributors
+ * SPDX-License-Identifier: BSL-1.1
+ */
+
+import { defineStore } from 'pinia';
+import { ref, watch } from 'vue';
+import { useAuthStore } from '@/stores/auth';
+import type { DashboardSortDirection, DashboardSortMode } from '@/utils/dashboardOrdering';
+
+/**
+ * How the dashboard calendar list is ordered, viewed and rendered, per account.
+ *
+ * Every preference — sort mode/direction, the manual drag order, the pins and the
+ * display view — lives under one per-account key (`dashboard:${userId}:prefs`),
+ * never under one global key. A signed-out visitor gets their own `dashboard:anon:prefs`
+ * slot, and switching accounts on a shared browser reloads that account's own stored
+ * choices; nothing account A saves can bleed into account B, and a signed-out visitor
+ * can never inherit a signed-in account's pins or order. Only preference metadata is
+ * stored (ids, sort/view choices) — never calendar contents or tokens.
+ *
+ * Everything read back is defensive: a malformed value, a truncated blob or a denied
+ * localStorage is treated as absent and the defaults are used, so the dashboard can
+ * never crash on a foreign or corrupt value.
+ */
+
+export type DashboardViewMode = 'card' | 'list' | 'expanded' | 'compact';
+
+const STORAGE_KEY_PREFIX = 'dashboard';
+const PREFS_SUFFIX = 'prefs';
+
+/** The per-account storage key; the signed-out session has its own anon slot. */
+function prefsKey(userId: string | null): string {
+  return `${STORAGE_KEY_PREFIX}:${userId ?? 'anon'}:${PREFS_SUFFIX}`;
+}
+
+interface StoredDashboardPrefs {
+  sortMode?: unknown;
+  sortDirection?: unknown;
+  pinnedIds?: unknown;
+  customOrder?: unknown;
+  viewMode?: unknown;
+}
+
+function isSortMode(value: unknown): value is DashboardSortMode {
+  return value === 'alphabetical' || value === 'custom';
+}
+
+function isSortDirection(value: unknown): value is DashboardSortDirection {
+  return value === 'asc' || value === 'desc';
+}
+
+function isViewMode(value: unknown): value is DashboardViewMode {
+  return value === 'card' || value === 'list' || value === 'expanded' || value === 'compact';
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(entry => typeof entry === 'string');
+}
+
+/**
+ * Normalise an ID list from storage or a caller: keep non-empty strings and drop
+ * duplicates, preserving first-occurrence order. A persisted `["a", "a"]` must render
+ * one card, not two (Vue keys would clash), and empty ids are meaningless, so both are
+ * discarded here rather than surviving into the ordering and the rendered cards.
+ */
+function normalizeIds(ids: readonly unknown[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const id of ids) {
+    if (typeof id !== 'string' || id === '') continue;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    result.push(id);
+  }
+  return result;
+}
+
+function loadPrefs(prefsKey: string): StoredDashboardPrefs {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(prefsKey);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    return typeof parsed === 'object' && parsed !== null ? (parsed as StoredDashboardPrefs) : {};
+  } catch {
+    // Malformed JSON or a denied storage read; treat as absent.
+    return {};
+  }
+}
+
+function savePrefs(prefs: StoredDashboardPrefs, prefsKey: string): void {
+  try {
+    localStorage.setItem(prefsKey, JSON.stringify(prefs));
+  } catch {
+    // Storage can be unavailable (private mode, quota); the preference simply does
+    // not survive a reload, which is a graceful degradation.
+  }
+}
+
+export const useDashboardStore = defineStore('dashboard', () => {
+  const authStore = useAuthStore();
+
+  const sortMode = ref<DashboardSortMode>('alphabetical');
+  const sortDirection = ref<DashboardSortDirection>('asc');
+  const pinnedIds = ref<string[]>([]);
+  const customOrder = ref<string[]>([]);
+  const viewMode = ref<DashboardViewMode>('card');
+
+  /**
+   * Which account's preferences currently live in the refs. The persistence watcher
+   * writes to this identity, captured when a change happens, rather than to
+   * `authStore.user.id` at flush time: without it, an account change that lands in
+   * the same tick would make A's in-memory value get saved into B's key.
+   */
+  let preferencesForUser: string | null = authStore.user?.id ?? null;
+
+  /** Load the stored preferences for the given account into the store. */
+  function applyUserPrefs(userId: string | null) {
+    const stored = loadPrefs(prefsKey(userId));
+    sortMode.value = isSortMode(stored.sortMode) ? stored.sortMode : 'alphabetical';
+    sortDirection.value = isSortDirection(stored.sortDirection) ? stored.sortDirection : 'asc';
+    pinnedIds.value = normalizeIds(isStringArray(stored.pinnedIds) ? stored.pinnedIds : []);
+    customOrder.value = normalizeIds(isStringArray(stored.customOrder) ? stored.customOrder : []);
+    viewMode.value = isViewMode(stored.viewMode) ? stored.viewMode : 'card';
+  }
+
+  applyUserPrefs(preferencesForUser);
+
+  /**
+   * Persist the current preferences to the identity they belong to.
+   *
+   * Called from every mutator, synchronously, rather than from a watch on the refs:
+   * a flush-time watcher re-fires after `applyUserPrefs` resets the refs during an
+   * account switch, persisting the incoming account's freshly-loaded (untouched)
+   * defaults into its key. Writing at mutation time ties each write to the identity
+   * the change belongs to, so a switch that lands in the same tick cannot reroute
+   * A's change into B's key nor materialise B's defaults for it.
+   */
+  function persistPrefs() {
+    savePrefs(
+      {
+        sortMode: sortMode.value,
+        sortDirection: sortDirection.value,
+        pinnedIds: pinnedIds.value,
+        customOrder: customOrder.value,
+        viewMode: viewMode.value,
+      },
+      prefsKey(preferencesForUser)
+    );
+  }
+
+  // Account switch: save the outgoing account's in-memory prefs to ITS OWN key first
+  // (the mutators already do this, but doing it here makes it atomic with the switch),
+  // then reload the incoming account's stored preferences. There is no global key and
+  // no separate view key — the view mode travels with the account like everything else.
+  watch(
+    () => authStore.user?.id ?? null,
+    (newId, oldId) => {
+      if (newId === oldId) return;
+      savePrefs(
+        {
+          sortMode: sortMode.value,
+          sortDirection: sortDirection.value,
+          pinnedIds: pinnedIds.value,
+          customOrder: customOrder.value,
+          viewMode: viewMode.value,
+        },
+        // Capture the outgoing identity explicitly: `newId` has already been written,
+        // and `preferencesForUser` is what the in-memory values belong to.
+        prefsKey(oldId)
+      );
+      preferencesForUser = newId;
+      applyUserPrefs(preferencesForUser);
+    }
+  );
+
+  function setSortMode(mode: DashboardSortMode) {
+    sortMode.value = mode;
+    persistPrefs();
+  }
+
+  function setSortDirection(direction: DashboardSortDirection) {
+    sortDirection.value = direction;
+    persistPrefs();
+  }
+
+  function togglePin(id: string) {
+    pinnedIds.value = pinnedIds.value.includes(id)
+      ? pinnedIds.value.filter(pinned => pinned !== id)
+      : [...pinnedIds.value, id];
+    persistPrefs();
+  }
+
+  function isPinned(id: string): boolean {
+    return pinnedIds.value.includes(id);
+  }
+
+  function setCustomOrder(ids: readonly string[]) {
+    customOrder.value = normalizeIds(ids);
+    persistPrefs();
+  }
+
+  /** Appends calendars that were added elsewhere (for example after a create). */
+  function appendToCustomOrder(ids: readonly string[]) {
+    customOrder.value = normalizeIds([...customOrder.value, ...ids]);
+    persistPrefs();
+  }
+
+  /** Drops ids of calendars that no longer exist, so the sequence stays clean. */
+  function pruneCustomOrder(ids: readonly string[]) {
+    const alive = new Set(ids);
+    customOrder.value = normalizeIds(customOrder.value.filter(id => alive.has(id)));
+    persistPrefs();
+  }
+
+  /** Drops pins of calendars that no longer exist. */
+  function prunePinned(ids: readonly string[]) {
+    const alive = new Set(ids);
+    pinnedIds.value = normalizeIds(pinnedIds.value.filter(id => alive.has(id)));
+    persistPrefs();
+  }
+
+  function setViewMode(mode: DashboardViewMode) {
+    viewMode.value = mode;
+    persistPrefs();
+  }
+
+  return {
+    sortMode,
+    sortDirection,
+    pinnedIds,
+    customOrder,
+    viewMode,
+    setSortMode,
+    setSortDirection,
+    setViewMode,
+    togglePin,
+    isPinned,
+    setCustomOrder,
+    appendToCustomOrder,
+    pruneCustomOrder,
+    prunePinned,
+  };
+});

@@ -70,6 +70,21 @@ line per release rather than listed individually.
   fallback coalesces country/year lookups in a bounded cache (24-hour successes,
   one-minute failures), with independent two-second fetch deadlines and no
   redirects. No public holiday lookup API is exposed.
+- **Dashboard pins, custom ordering and layout controls, per user.** Calendar
+  cards can be pinned, unpinned, moved with buttons or drag-and-drop (both use
+  the same canonical move so pins stay grouped above the rest), and the
+  dashboard layout can be chosen (list / card / compact). The saved preference
+  set is keyed by the authenticated user ID — not one global key — so each
+  account keeps its own pins and order, a signed-out visitor never sees another
+  account's calendars, and malformed or stale persisted data is ignored rather
+  than crashing the page. Stale order entries are pruned only after a
+  successful authoritative list load, never after an API failure.
+- **Keyboard-usable dashboard reordering.** After a move the moved calendar's
+  move control keeps keyboard focus (never dropping to the page background),
+  choosing the opposite enabled control at a group boundary and falling back to
+  the calendar link when no move control remains; a screen reader is told the
+  new position through a polite live region. Buttons have localized accessible
+  names and proper disabled states, and pin state uses `aria-pressed`.
 
 ### Changed
 
