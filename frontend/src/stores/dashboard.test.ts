@@ -6,8 +6,8 @@
  * @vitest-environment jsdom
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createPinia, setActivePinia } from 'pinia';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createPinia as newPinia, disposePinia, setActivePinia } from 'pinia';
 import { nextTick } from 'vue';
 import type { User } from '@/types';
 
@@ -37,6 +37,27 @@ vi.mock('@/api/client', () => ({ apiClient }));
 
 const { useAuthStore } = await import('./auth');
 const { useDashboardStore } = await import('./dashboard');
+
+const instances: ReturnType<typeof newPinia>[] = [];
+function createPinia() {
+  const pinia = newPinia();
+  instances.push(pinia);
+  return pinia;
+}
+afterEach(() => {
+  for (const pinia of instances.splice(0)) disposePinia(pinia);
+});
+
+function tab(userId = 'u-a') {
+  const pinia = createPinia();
+  const auth = useAuthStore(pinia);
+  auth.user = user(userId);
+  return { auth, dashboard: useDashboardStore(pinia) };
+}
+
+function storageEvent(key: string | null, area = localStorage) {
+  window.dispatchEvent(new StorageEvent('storage', { key, storageArea: area }));
+}
 
 function user(id: string): User {
   return { id, email: `${id}@x.test`, display_name: id, role: 'user' } as User;
@@ -249,6 +270,132 @@ describe('dashboard preferences store', () => {
     expect(store.pinnedIds).toEqual([]);
     // The account's own key still holds its choices.
     expect((stored('u-a') as { pinnedIds?: unknown }).pinnedIds).toEqual(['c-a1']);
+  });
+
+  it('preserves another tab pins when a stale tab changes sorting before its storage event arrives', () => {
+    const a = tab();
+    const b = tab();
+    a.dashboard.togglePin('alpha');
+    expect(b.dashboard.pinnedIds).toEqual([]);
+    b.dashboard.setSortDirection('desc');
+    expect(stored('u-a')).toMatchObject({ pinnedIds: ['alpha'], sortDirection: 'desc' });
+    expect(b.dashboard.pinnedIds).toEqual(['alpha']);
+    a.dashboard.setViewMode('compact');
+    expect(stored('u-a')).toMatchObject({
+      pinnedIds: ['alpha'],
+      sortDirection: 'desc',
+      viewMode: 'compact',
+    });
+  });
+
+  it('toggle, append and prune use the latest arrays, not stale tab memory', () => {
+    const a = tab();
+    const b = tab();
+    a.dashboard.togglePin('alpha');
+    b.dashboard.togglePin('bravo');
+    expect(b.dashboard.pinnedIds).toEqual(['alpha', 'bravo']);
+    a.dashboard.togglePin('bravo');
+    expect(a.dashboard.pinnedIds).toEqual(['alpha']);
+    a.dashboard.setCustomOrder(['alpha', 'bravo']);
+    b.dashboard.appendToCustomOrder(['charlie']);
+    expect(b.dashboard.customOrder).toEqual(['alpha', 'bravo', 'charlie']);
+    a.dashboard.pruneCustomOrder(['alpha', 'charlie']);
+    expect(a.dashboard.customOrder).toEqual(['alpha', 'charlie']);
+    b.dashboard.prunePinned(['bravo']);
+    expect(stored('u-a')).toMatchObject({ customOrder: ['alpha', 'charlie'], pinnedIds: [] });
+  });
+
+  it('all field mutators preserve unrelated fields from the latest snapshot', () => {
+    const a = tab();
+    const b = tab();
+    a.dashboard.setViewMode('expanded');
+    a.dashboard.setCustomOrder(['alpha', 'bravo']);
+    a.dashboard.togglePin('alpha');
+    b.dashboard.setSortMode('custom');
+    expect(stored('u-a')).toMatchObject({
+      viewMode: 'expanded',
+      customOrder: ['alpha', 'bravo'],
+      pinnedIds: ['alpha'],
+      sortMode: 'custom',
+    });
+    a.dashboard.setSortDirection('desc');
+    b.dashboard.setCustomOrder(['bravo', 'alpha']);
+    expect(stored('u-a')).toMatchObject({
+      viewMode: 'expanded',
+      sortMode: 'custom',
+      sortDirection: 'desc',
+      pinnedIds: ['alpha'],
+      customOrder: ['bravo', 'alpha'],
+    });
+  });
+
+  it('sign-out and account switching never write a stale outgoing snapshot', () => {
+    const a = tab();
+    const b = tab();
+    a.dashboard.togglePin('alpha');
+    const saved = localStorage.getItem('dashboard:u-a:prefs');
+    const write = vi.spyOn(Storage.prototype, 'setItem');
+    try {
+      b.auth.user = null;
+      expect(b.dashboard.pinnedIds).toEqual([]);
+      expect(localStorage.getItem('dashboard:u-a:prefs')).toBe(saved);
+      b.auth.user = user('u-b');
+      expect(write).not.toHaveBeenCalled();
+      b.dashboard.setViewMode('list');
+      expect(stored('u-b')).toMatchObject({ viewMode: 'list', pinnedIds: [] });
+      expect(localStorage.getItem('dashboard:u-a:prefs')).toBe(saved);
+    } finally {
+      write.mockRestore();
+    }
+  });
+
+  it('refreshes storage events without writing or replaying stale event data', () => {
+    const a = tab();
+    const b = tab();
+    a.dashboard.togglePin('alpha');
+    const write = vi.spyOn(Storage.prototype, 'setItem');
+    try {
+      storageEvent('dashboard:u-a:prefs');
+      expect(b.dashboard.pinnedIds).toEqual(['alpha']);
+      expect(write).not.toHaveBeenCalled();
+      b.dashboard.setSortDirection('desc');
+      window.dispatchEvent(
+        new StorageEvent('storage', {
+          key: 'dashboard:u-a:prefs',
+          storageArea: localStorage,
+          newValue: '{}',
+        })
+      );
+      expect(b.dashboard.sortDirection).toBe('desc');
+    } finally {
+      write.mockRestore();
+    }
+  });
+
+  it('ignores unrelated events and resets after active-key removal or clear', () => {
+    const b = tab();
+    b.dashboard.togglePin('alpha');
+    localStorage.setItem('dashboard:u-a:prefs', JSON.stringify({ pinnedIds: ['bravo'] }));
+    storageEvent('dashboard:u-b:prefs');
+    storageEvent('dashboard:u-a:prefs', sessionStorage);
+    expect(b.dashboard.pinnedIds).toEqual(['alpha']);
+    storageEvent('dashboard:u-a:prefs');
+    expect(b.dashboard.pinnedIds).toEqual(['bravo']);
+    localStorage.removeItem('dashboard:u-a:prefs');
+    storageEvent('dashboard:u-a:prefs');
+    expect(b.dashboard.pinnedIds).toEqual([]);
+    b.dashboard.setViewMode('compact');
+    localStorage.clear();
+    storageEvent(null);
+    expect(b.dashboard.viewMode).toBe('card');
+  });
+
+  it('removes its storage listener on disposal', () => {
+    const b = tab();
+    b.dashboard.$dispose();
+    localStorage.setItem('dashboard:u-a:prefs', JSON.stringify({ pinnedIds: ['bravo'] }));
+    storageEvent('dashboard:u-a:prefs');
+    expect(b.dashboard.pinnedIds).toEqual([]);
   });
 
   it('stores only preference metadata, never account tokens or calendar contents', () => {
