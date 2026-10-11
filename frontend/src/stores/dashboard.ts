@@ -5,7 +5,7 @@
  */
 
 import { defineStore } from 'pinia';
-import { ref, watch } from 'vue';
+import { onScopeDispose, ref, watch } from 'vue';
 import { useAuthStore } from '@/stores/auth';
 import type { DashboardSortDirection, DashboardSortMode } from '@/utils/dashboardOrdering';
 
@@ -77,16 +77,16 @@ function normalizeIds(ids: readonly unknown[]): string[] {
   return result;
 }
 
-function loadPrefs(prefsKey: string): StoredDashboardPrefs {
-  if (typeof window === 'undefined') return {};
+function loadPrefs(prefsKey: string): StoredDashboardPrefs | null {
+  if (typeof window === 'undefined') return null;
   try {
     const raw = localStorage.getItem(prefsKey);
-    if (!raw) return {};
+    if (!raw) return null;
     const parsed: unknown = JSON.parse(raw);
     return typeof parsed === 'object' && parsed !== null ? (parsed as StoredDashboardPrefs) : {};
   } catch {
     // Malformed JSON or a denied storage read; treat as absent.
-    return {};
+    return null;
   }
 }
 
@@ -109,21 +109,22 @@ export const useDashboardStore = defineStore('dashboard', () => {
   const viewMode = ref<DashboardViewMode>('card');
 
   /**
-   * Which account's preferences currently live in the refs. The persistence watcher
-   * writes to this identity, captured when a change happens, rather than to
-   * `authStore.user.id` at flush time: without it, an account change that lands in
-   * the same tick would make A's in-memory value get saved into B's key.
+   * Which account owns the refs. Account switching is synchronous so a mutator
+   * called in the same tick always updates the incoming account, never the old one.
    */
   let preferencesForUser: string | null = authStore.user?.id ?? null;
 
-  /** Load the stored preferences for the given account into the store. */
-  function applyUserPrefs(userId: string | null) {
-    const stored = loadPrefs(prefsKey(userId));
+  function applyPrefs(stored: StoredDashboardPrefs) {
     sortMode.value = isSortMode(stored.sortMode) ? stored.sortMode : 'alphabetical';
     sortDirection.value = isSortDirection(stored.sortDirection) ? stored.sortDirection : 'asc';
     pinnedIds.value = normalizeIds(isStringArray(stored.pinnedIds) ? stored.pinnedIds : []);
     customOrder.value = normalizeIds(isStringArray(stored.customOrder) ? stored.customOrder : []);
     viewMode.value = isViewMode(stored.viewMode) ? stored.viewMode : 'card';
+  }
+
+  /** Reload without persisting: switching accounts or tabs must never write stale data. */
+  function applyUserPrefs(userId: string | null) {
+    applyPrefs(loadPrefs(prefsKey(userId)) ?? {});
   }
 
   applyUserPrefs(preferencesForUser);
@@ -151,46 +152,65 @@ export const useDashboardStore = defineStore('dashboard', () => {
     );
   }
 
-  // Account switch: save the outgoing account's in-memory prefs to ITS OWN key first
-  // (the mutators already do this, but doing it here makes it atomic with the switch),
-  // then reload the incoming account's stored preferences. There is no global key and
-  // no separate view key — the view mode travels with the account like everything else.
+  // Mutators already persist. Saving on account switch/sign-out would overwrite
+  // newer changes from another tab. Retain stored metadata, but reset the visible
+  // account's state immediately, without writing either account's key.
   watch(
     () => authStore.user?.id ?? null,
     (newId, oldId) => {
       if (newId === oldId) return;
-      savePrefs(
-        {
-          sortMode: sortMode.value,
-          sortDirection: sortDirection.value,
-          pinnedIds: pinnedIds.value,
-          customOrder: customOrder.value,
-          viewMode: viewMode.value,
-        },
-        // Capture the outgoing identity explicitly: `newId` has already been written,
-        // and `preferencesForUser` is what the in-memory values belong to.
-        prefsKey(oldId)
-      );
       preferencesForUser = newId;
       applyUserPrefs(preferencesForUser);
-    }
+    },
+    { flush: 'sync' }
   );
 
-  function setSortMode(mode: DashboardSortMode) {
-    sortMode.value = mode;
+  // Re-read immediately before changing a field, even if a storage event has not
+  // arrived yet. Toggle/append/prune operations must also use the latest arrays.
+  // If storage is missing or denied, keep usable in-memory preferences; a real
+  // cross-tab removal/clear event explicitly resets them below.
+  function mutatePrefs(change: () => void) {
+    const stored = loadPrefs(prefsKey(preferencesForUser));
+    if (stored !== null) applyPrefs(stored);
+    change();
     persistPrefs();
+  }
+
+  function onStorage(event: StorageEvent) {
+    try {
+      if (event.storageArea !== window.localStorage) return;
+    } catch {
+      return;
+    }
+    if (event.key !== null && event.key !== prefsKey(preferencesForUser)) return;
+    // Read current storage, not event.newValue: delayed events can describe an
+    // older write than a subsequent write already made by this tab.
+    applyUserPrefs(preferencesForUser);
+  }
+
+  if (typeof window !== 'undefined') {
+    window.addEventListener('storage', onStorage);
+    onScopeDispose(() => window.removeEventListener('storage', onStorage));
+  }
+
+  function setSortMode(mode: DashboardSortMode) {
+    mutatePrefs(() => {
+      sortMode.value = mode;
+    });
   }
 
   function setSortDirection(direction: DashboardSortDirection) {
-    sortDirection.value = direction;
-    persistPrefs();
+    mutatePrefs(() => {
+      sortDirection.value = direction;
+    });
   }
 
   function togglePin(id: string) {
-    pinnedIds.value = pinnedIds.value.includes(id)
-      ? pinnedIds.value.filter(pinned => pinned !== id)
-      : [...pinnedIds.value, id];
-    persistPrefs();
+    mutatePrefs(() => {
+      pinnedIds.value = pinnedIds.value.includes(id)
+        ? pinnedIds.value.filter(pinned => pinned !== id)
+        : normalizeIds([...pinnedIds.value, id]);
+    });
   }
 
   function isPinned(id: string): boolean {
@@ -198,33 +218,38 @@ export const useDashboardStore = defineStore('dashboard', () => {
   }
 
   function setCustomOrder(ids: readonly string[]) {
-    customOrder.value = normalizeIds(ids);
-    persistPrefs();
+    mutatePrefs(() => {
+      customOrder.value = normalizeIds(ids);
+    });
   }
 
   /** Appends calendars that were added elsewhere (for example after a create). */
   function appendToCustomOrder(ids: readonly string[]) {
-    customOrder.value = normalizeIds([...customOrder.value, ...ids]);
-    persistPrefs();
+    mutatePrefs(() => {
+      customOrder.value = normalizeIds([...customOrder.value, ...ids]);
+    });
   }
 
   /** Drops ids of calendars that no longer exist, so the sequence stays clean. */
   function pruneCustomOrder(ids: readonly string[]) {
     const alive = new Set(ids);
-    customOrder.value = normalizeIds(customOrder.value.filter(id => alive.has(id)));
-    persistPrefs();
+    mutatePrefs(() => {
+      customOrder.value = normalizeIds(customOrder.value.filter(id => alive.has(id)));
+    });
   }
 
   /** Drops pins of calendars that no longer exist. */
   function prunePinned(ids: readonly string[]) {
     const alive = new Set(ids);
-    pinnedIds.value = normalizeIds(pinnedIds.value.filter(id => alive.has(id)));
-    persistPrefs();
+    mutatePrefs(() => {
+      pinnedIds.value = normalizeIds(pinnedIds.value.filter(id => alive.has(id)));
+    });
   }
 
   function setViewMode(mode: DashboardViewMode) {
-    viewMode.value = mode;
-    persistPrefs();
+    mutatePrefs(() => {
+      viewMode.value = mode;
+    });
   }
 
   return {
