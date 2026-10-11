@@ -358,6 +358,43 @@ in rather than configured.
 
 ---
 
+### Holiday validation and optional network fallback
+
+Server-side holiday validation uses bundled `github.com/rickar/cal/v2` rules
+without network access for 47 countries, including Australia, Japan and Thailand:
+
+`AR AT AU BE BG BR CA CH CY CZ DE DK EE ES FI FR GB GR HR HU IE IS IT JP KE LT LU
+LV MT MW MX NC NL NO NZ PL PT RO RS RU SE SI SK TH UA US ZA`.
+
+The calendar's time zone identifies a country, not a state or region. Only the
+bundled national set is used; Australian state-specific dates and ANZAC
+substitution rules are not promoted to national holidays. Known holidays count
+on their actual date and any bundled observed substitute date, even on weekends.
+The bundled rules are not an authoritative guarantee of every exceptional or
+movable holiday: for example, the Thai pack does not include lunar holidays or
+all government-announced extra days. The frontend's separate holiday renderer
+can display a different set; it is not the server's source of validation data.
+
+For countries without bundled rules, remote lookup is **disabled by default**.
+To opt in, set the following in `.env` and restart the backend:
+
+```env
+HOLIDAYS_NAGER_FALLBACK_ENABLED=true
+```
+
+Production and devcontainer Compose forward this setting to the backend. The
+host development backend loads it directly from `.env`; the database-only dev
+Compose stack has no backend environment to forward it to.
+
+Opting in permits HTTPS requests to `date.nager.at` for the country code and
+year, with a bounded cache (24-hour successes, one-minute failures), a two-second
+request timeout, and no redirects. Bundled countries never use that fallback.
+When the fallback is disabled, unsupported, or unavailable, holiday `block`
+validation **fails open to ordinary weekday rules**: unknown holidays are not
+blocked. Holiday `allow` and holiday-eve exceptions cannot grant a day without
+known holiday data. No holiday lookup HTTP endpoints are exposed. See
+[logging and privacy](docs/logging-and-privacy.md) for outbound-data details.
+
 ### Reminder delivery
 
 Calendar owners enable reminders in notification settings and choose a lead time

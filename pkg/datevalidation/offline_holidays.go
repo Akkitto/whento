@@ -14,6 +14,7 @@ import (
 	"github.com/rickar/cal/v2"
 	"github.com/rickar/cal/v2/ar"
 	"github.com/rickar/cal/v2/at"
+	"github.com/rickar/cal/v2/au"
 	"github.com/rickar/cal/v2/be"
 	"github.com/rickar/cal/v2/bg"
 	"github.com/rickar/cal/v2/br"
@@ -34,6 +35,7 @@ import (
 	"github.com/rickar/cal/v2/ie"
 	"github.com/rickar/cal/v2/is"
 	"github.com/rickar/cal/v2/it"
+	"github.com/rickar/cal/v2/jp"
 	"github.com/rickar/cal/v2/ke"
 	"github.com/rickar/cal/v2/lt"
 	"github.com/rickar/cal/v2/lu"
@@ -53,6 +55,7 @@ import (
 	"github.com/rickar/cal/v2/se"
 	"github.com/rickar/cal/v2/si"
 	"github.com/rickar/cal/v2/sk"
+	"github.com/rickar/cal/v2/th"
 	"github.com/rickar/cal/v2/ua"
 	"github.com/rickar/cal/v2/us"
 	"github.com/rickar/cal/v2/za"
@@ -84,13 +87,16 @@ func buildOfflineCalendars() {
 	// out of scope for the current country-level model, so each map entry takes
 	// the national set.
 	//
-	// Not every library pack ships a single national `Holidays` slice: the
-	// Australia/Japan/Thailand packs are region-only, so their ISO codes are
-	// absent here and those countries are served by the Nager fallback instead
-	// of an empty offline guess.
+	// Australia has regional slices only. Select the holidays common across
+	// the country explicitly; do not treat state-specific days or ANZAC
+	// substitute dates as national. JP and TH ship national Holidays slices.
 	offlineCalendars = map[string]*cal.Calendar{
 		"AR": calendarFrom(ar.Holidays),
 		"AT": calendarFrom(at.Holidays),
+		"AU": calendarFrom([]*cal.Holiday{
+			au.NewYear, au.AustraliaDay, au.GoodFriday, au.EasterMonday,
+			au.AnzacDay, au.ChristmasDay, au.BoxingDay, au.MourningDay2022,
+		}),
 		"BE": calendarFrom(be.Holidays),
 		"BG": calendarFrom(bg.Holidays),
 		"BR": calendarFrom(br.Holidays),
@@ -111,6 +117,7 @@ func buildOfflineCalendars() {
 		"IE": calendarFrom(ie.Holidays),
 		"IS": calendarFrom(is.Holidays),
 		"IT": calendarFrom(it.Holidays),
+		"JP": calendarFrom(jp.Holidays),
 		"KE": calendarFrom(ke.Holidays),
 		"LT": calendarFrom(lt.Holidays),
 		"LU": calendarFrom(lu.Holidays),
@@ -130,6 +137,7 @@ func buildOfflineCalendars() {
 		"SE": calendarFrom(se.Holidays),
 		"SI": calendarFrom(si.Holidays),
 		"SK": calendarFrom(sk.Holidays),
+		"TH": calendarFrom(th.Holidays),
 		"UA": calendarFrom(ua.Holidays),
 		"US": calendarFrom(us.Holidays),
 		"ZA": calendarFrom(za.Holidays),
@@ -148,7 +156,19 @@ func buildOfflineCalendars() {
 // date as holidays.
 func calendarFrom(holidays []*cal.Holiday) *cal.Calendar {
 	c := &cal.Calendar{}
-	c.AddHoliday(holidays...)
+	for _, holiday := range holidays {
+		copy := holiday.Clone(nil)
+		if calculate := copy.Func; calculate != nil {
+			// Some upstream calculators (notably Japan's vernal equinox)
+			// mutate their argument. Keep compiled rules immutable and give
+			// each concurrent calculation its own value.
+			copy.Func = func(rule *cal.Holiday, year int) time.Time {
+				local := *rule
+				return calculate(&local, year)
+			}
+		}
+		c.AddHoliday(copy)
+	}
 	return c
 }
 

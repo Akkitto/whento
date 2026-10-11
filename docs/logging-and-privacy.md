@@ -13,11 +13,32 @@ it can be re-checked rather than believed.
 
 ## 1. There is no telemetry
 
-WhenTo sends nothing anywhere. No analytics, no crash reporting, no phone-home,
-no update check, no vendor SDK. The only outbound connections a self-hosted
+WhenTo has no analytics, crash reporting, phone-home, update check or vendor SDK.
+By default, the outbound application connections a self-hosted
 instance makes are to its own PostgreSQL, its own Redis, the SMTP server you
 configured, and notification providers explicitly enabled by a calendar owner
 (Discord, Slack or Telegram).
+
+Holiday validation uses bundled national rules locally. Setting
+`HOLIDAYS_NAGER_FALLBACK_ENABLED=true` explicitly permits an additional HTTPS
+connection to `date.nager.at` for countries without bundled rules. It is disabled
+by default in both deployment modes. The request path contains only the country
+code and year; no calendar name, participant data, calendar link or selected
+availability dates are sent. The provider still sees the server's source IP and
+ordinary HTTP connection metadata. Redirects are refused; requests have a
+two-second timeout, a bounded 256-entry country/year cache, a 24-hour success TTL
+and a one-minute failure cooldown. Concurrent callers share a fetch without one
+caller's cancellation affecting the others. Bundled countries never use this
+fallback. DNS resolution and operator-configured HTTP proxies follow the runtime
+and network configuration as with other outbound connections.
+
+With fallback disabled or unavailable, uncovered countries fail open to the
+ordinary weekday decision: an unknown holiday is not blocked. Coverage means
+the national rules supplied by the bundled library, not regional or exhaustive
+government-announced holidays. See [holiday validation](../README.md#holiday-validation-and-optional-network-fallback)
+for country coverage and known dataset limitations. Earlier versions using
+`go-holidays` contacted Nager implicitly; the outbound inventory for those
+versions was not limited to database/cache/email/notification connections.
 
 Logs are written to **stdout** as structured JSON
 ([`pkg/logger`](../pkg/logger/logger.go), Go's `log/slog`). Where they go from

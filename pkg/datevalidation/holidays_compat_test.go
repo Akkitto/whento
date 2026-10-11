@@ -31,13 +31,10 @@ func TestUnsupportedCountryOrdinaryWednesdayAdmitted(t *testing.T) {
 		country  string
 		timezone string
 	}{
-		{"JP", "Asia/Tokyo"},
-		{"AU", "Australia/Sydney"},
 		{"IN", "Asia/Kolkata"},
 		{"CN", "Asia/Shanghai"},
 		{"KR", "Asia/Seoul"},
 		{"SG", "Asia/Singapore"},
-		{"TH", "Asia/Bangkok"},
 		{"IL", "Asia/Jerusalem"},
 		{"TR", "Europe/Istanbul"},
 	}
@@ -258,14 +255,14 @@ func TestHolidaysForYearContextCancellation(t *testing.T) {
 	}
 }
 
-// TestOfflineCountryFailsOpenWithoutFallback proves JP (not offline) plus a
+// TestUncoveredCountryFailsOpenWithoutFallback proves KR (not offline) plus a
 // disabled fallback = the block policy still admits an ordinary weekday.
-func TestOfflineCountryFailsOpenWithoutFallback(t *testing.T) {
+func TestUncoveredCountryFailsOpenWithoutFallback(t *testing.T) {
 	restore := SetNagerBaseURL("")
 	defer restore()
 
 	wednesday := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
-	if !IsDateAllowed(wednesday, "Asia/Tokyo", []int{int(time.Wednesday)}, "block", false) {
-		t.Error("JP ordinary Wednesday refused when holiday data is unavailable")
+	if !IsDateAllowed(wednesday, "Asia/Seoul", []int{int(time.Wednesday)}, "block", false) {
+		t.Error("KR ordinary Wednesday refused when holiday data is unavailable")
 	}
 }

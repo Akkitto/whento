@@ -93,6 +93,9 @@ type Config struct {
 	// Reminders
 	Reminders RemindersConfig
 
+	// Holiday network lookup is opt-in; bundled country rules are always local.
+	HolidaysNagerFallbackEnabled bool
+
 	// WebAuthn (for Passkey authentication)
 	WebAuthnRPName   string
 	WebAuthnRPID     string
@@ -243,6 +246,8 @@ func Load() *Config {
 			MaxAttempts:   l.integer("REMINDER_MAX_ATTEMPTS", 5),
 			RetryBackoff:  l.duration("REMINDER_RETRY_BACKOFF", 1*time.Minute),
 		},
+
+		HolidaysNagerFallbackEnabled: l.boolean("HOLIDAYS_NAGER_FALLBACK_ENABLED", false),
 
 		// WebAuthn (for Passkey authentication)
 		WebAuthnRPName:   getEnv("WEBAUTHN_RP_NAME", "WhenTo"),

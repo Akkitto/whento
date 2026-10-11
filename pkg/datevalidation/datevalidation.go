@@ -15,7 +15,7 @@ import (
 // isHolidayErr is the error-aware holiday check: it distinguishes "this date is
 // not a public holiday; data present" (false, nil) from "no holiday data could
 // be obtained for this country" (false, err). The offline table answers for the
-// 44 countries it ships; everything else goes through the Nager fallback with
+// bundled countries; everything else uses the opt-in Nager fallback with
 // its bounded cache. Callers decide what a missing dataset means for their
 // policy; the lookup itself never lies.
 func isHolidayErr(date time.Time, countryCode string) (bool, error) {
@@ -69,7 +69,7 @@ func IsDateAllowed(date time.Time, timezone string, allowedWeekdays []int, holid
 }
 
 // IsDateAllowedContext is IsDateAllowed with a context that reaches the network
-// holiday fallback (used for the request-scoped API handler). The offline table
+// holiday fallback. The offline table
 // is unaffected by it, and the decision is otherwise identical.
 func IsDateAllowedContext(ctx context.Context, date time.Time, timezone string, allowedWeekdays []int, holidaysPolicy string, allowHolidayEves bool) bool {
 	// Get country code from timezone for holiday checking.

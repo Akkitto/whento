@@ -53,6 +53,22 @@ func testRouter(t *testing.T, rateLimitEnabled bool) chi.Router {
 	return newRouter(d, &handlers{}, spa)
 }
 
+func TestUnusedHolidayEndpointsAreNotExposed(t *testing.T) {
+	for _, limited := range []bool{false, true} {
+		router := testRouter(t, limited)
+		for _, path := range []string{
+			"/api/v1/holidays?country=fr&year=2026",
+			"/api/v1/holidays/supported",
+		} {
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("%s status = %d; want 404", path, response.Code)
+			}
+		}
+	}
+}
+
 // walkRoutes returns "METHOD /path" for every registered route, sorted.
 func walkRoutes(t *testing.T, r chi.Router) []string {
 	t.Helper()
@@ -181,11 +197,6 @@ var wantRoutes = []string{
 	"GET /api/v1/availabilities/calendar/{token}/dates/{date}",
 	"GET /api/v1/availabilities/calendar/{token}/range",
 
-	// Holidays (offline dataset + bounded remote fallback; both endpoints are
-	// mounted by the same handler group).
-	"GET /api/v1/holidays",
-	"GET /api/v1/holidays/supported",
-
 	// Quota. Half of the cloud/self-hosted symmetric pair: both variants must
 	// mount this, which is why it is asserted from a test that compiles under
 	// either build tag.
@@ -302,10 +313,6 @@ var wantRateLimited = []string{
 	"DELETE /api/v1/availabilities/calendar/{token}/participant/{pid}/recurrence/{rid}/exception/{date}",
 	"GET /api/v1/availabilities/calendar/{token}/dates/{date}",
 	"GET /api/v1/availabilities/calendar/{token}/range",
-
-	// Holidays: both endpoints mounted with the limiter in the same group.
-	"GET /api/v1/holidays",
-	"GET /api/v1/holidays/supported",
 
 	// Both ICS groups
 	"GET /api/v1/ics/feed/{token}",

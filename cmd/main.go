@@ -56,6 +56,7 @@ import (
 	"github.com/whento/pkg/broadcast"
 	"github.com/whento/pkg/cache"
 	"github.com/whento/pkg/database"
+	"github.com/whento/pkg/datevalidation"
 	"github.com/whento/pkg/email"
 	"github.com/whento/pkg/jwt"
 	"github.com/whento/pkg/logger"
@@ -136,6 +137,9 @@ func run() error {
 	if err := cfg.Validate(); err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
+
+	restoreHolidayFallback := datevalidation.SetNagerFallbackEnabled(cfg.HolidaysNagerFallbackEnabled)
+	defer restoreHolidayFallback()
 
 	// The incoherences that leave one feature dead and the rest of the instance
 	// serviceable. Refusing to start over them would turn an upgrade into an

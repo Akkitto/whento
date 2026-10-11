@@ -55,6 +55,9 @@ services:
       - REMINDER_MAX_ATTEMPTS=${REMINDER_MAX_ATTEMPTS:-5}
       - REMINDER_RETRY_BACKOFF=${REMINDER_RETRY_BACKOFF:-1m}
 
+      # Optional third-party holiday lookup for countries without bundled rules.
+      - HOLIDAYS_NAGER_FALLBACK_ENABLED=${HOLIDAYS_NAGER_FALLBACK_ENABLED:-false}
+
       # Registration
       - EMAIL_VERIFICATION_ENABLED=${EMAIL_VERIFICATION_ENABLED:-true}
       - ALLOWED_REGISTER=${ALLOWED_REGISTER:-true}
