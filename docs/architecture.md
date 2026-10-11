@@ -255,10 +255,14 @@ what a calendar is, it belongs in `internal/`.
 [ADR-0003](adr/0003-no-orm-hand-written-sql.md).
 
 Migrations are golang-migrate, in three source directories —
-`migrations/{common,cloud,selfhosted}` — merged at build time by
-[`scripts/build-migrations.sh`](../scripts/build-migrations.sh) into a temporary
-`migrations-build/` that every `make migrate-*` target deletes afterwards. Never
-run `migrate` directly against `migrations/`.
+`migrations/{common,cloud,selfhosted}` — assembled per run by
+[`scripts/build-migrations.sh`](../scripts/build-migrations.sh) into a scratch
+directory owned by the writer. All `make migrate-*` targets go through
+[`scripts/migrate.sh`](../scripts/migrate.sh), which resolves one canonical
+`DATABASE_URL`, builds the chain into its own `mktemp` directory, applies the
+requested operation, and removes only that directory on success, failure and
+signals. `reset`/`down` are destructive and require explicit consent; never run
+`migrate` directly against `migrations/`.
 
 The numbering space is **shared across all three directories**, with one
 exception: a number may be reused between `cloud/` and `selfhosted/`, since only
