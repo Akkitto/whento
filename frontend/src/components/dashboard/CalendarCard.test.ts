@@ -6,10 +6,20 @@
  * @vitest-environment jsdom
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { mountWithI18n, lastEmit } from '@/test/harness';
 import type { CalendarWithParticipants } from '@/types';
 import CalendarCard from './CalendarCard.vue';
+
+const mounted: { unmount(): void }[] = [];
+function track<T extends { unmount(): void }>(wrapper: T): T {
+  mounted.push(wrapper);
+  return wrapper;
+}
+afterEach(() => {
+  for (const wrapper of mounted.splice(0)) wrapper.unmount();
+  document.body.innerHTML = '';
+});
 
 function calendar(overrides: Partial<CalendarWithParticipants> = {}): CalendarWithParticipants {
   return {
@@ -23,19 +33,21 @@ function calendar(overrides: Partial<CalendarWithParticipants> = {}): CalendarWi
 }
 
 function mountCard(props: Record<string, unknown> = {}) {
-  return mountWithI18n(CalendarCard, {
-    props: {
-      calendar: calendar(),
-      view: 'card',
-      pinned: false,
-      draggable: false,
-      canMoveUp: true,
-      canMoveDown: true,
-      unifiedFeedConfigured: false,
-      feedIncluded: false,
-      ...props,
-    },
-  });
+  return track(
+    mountWithI18n(CalendarCard, {
+      props: {
+        calendar: calendar(),
+        view: 'card',
+        pinned: false,
+        draggable: false,
+        canMoveUp: true,
+        canMoveDown: true,
+        unifiedFeedConfigured: false,
+        feedIncluded: false,
+        ...props,
+      },
+    })
+  );
 }
 
 /**
@@ -43,20 +55,22 @@ function mountCard(props: Record<string, unknown> = {}) {
  * elements actually in `<body>` — the wrapper must be attached there.
  */
 function mountCardAttached(props: Record<string, unknown> = {}) {
-  return mountWithI18n(CalendarCard, {
-    attachTo: document.body,
-    props: {
-      calendar: calendar(),
-      view: 'card',
-      pinned: false,
-      draggable: false,
-      canMoveUp: true,
-      canMoveDown: true,
-      unifiedFeedConfigured: false,
-      feedIncluded: false,
-      ...props,
-    },
-  });
+  return track(
+    mountWithI18n(CalendarCard, {
+      attachTo: document.body,
+      props: {
+        calendar: calendar(),
+        view: 'card',
+        pinned: false,
+        draggable: false,
+        canMoveUp: true,
+        canMoveDown: true,
+        unifiedFeedConfigured: false,
+        feedIncluded: false,
+        ...props,
+      },
+    })
+  );
 }
 
 type CardVm = {
@@ -160,18 +174,38 @@ describe('CalendarCard', () => {
     expect(lastEmit(wrapper, 'toggle-pin')).toBeTruthy();
   });
 
-  it('shows the feed toggle only when the unified feed is configured', async () => {
-    const hidden = mountCard();
-    expect(hidden.find('input[type=checkbox]').exists()).toBe(false);
+  it.each(['card', 'expanded', 'list', 'compact'])(
+    'shows one labeled feed toggle in %s only when configured',
+    async view => {
+      const hidden = mountCard({ view });
+      expect(hidden.find('input[type=checkbox]').exists()).toBe(false);
 
-    const shown = mountCard({ unifiedFeedConfigured: true });
-    await shown.find('input[type=checkbox]').setValue(true);
-    expect(lastEmit(shown, 'toggle-feed')).toBeTruthy();
-  });
+      const shown = mountCard({ view, unifiedFeedConfigured: true, feedIncluded: true });
+      expect(shown.findAll('[data-action="feed"]')).toHaveLength(1);
+      const input = shown.find('input[type=checkbox]');
+      expect(shown.find('label').attributes('for')).toBe(input.attributes('id'));
+      expect((input.element as HTMLInputElement).checked).toBe(true);
+      await input.setValue(false);
+      expect(lastEmit(shown, 'toggle-feed')).toBeTruthy();
+      expect(shown.emitted('open')).toBeUndefined();
+    }
+  );
+
+  it.each(['card', 'expanded', 'list', 'compact'])(
+    'keeps the pointer drag grip out of the %s tab order',
+    view => {
+      const wrapper = mountCard({ view, draggable: true });
+      const grip = wrapper.find('[data-action="drag"]');
+      expect(grip.attributes('tabindex')).toBe('-1');
+      expect(grip.attributes('aria-hidden')).toBe('true');
+      expect(grip.attributes('draggable')).toBe('true');
+      expect(wrapper.find('[data-action="move-up"]').attributes('aria-label')).toBeTruthy();
+    }
+  );
 
   it('emits drop-on with the calendar id', async () => {
     const wrapper = mountCard();
-    await wrapper.trigger('drop');
+    await wrapper.find('article').trigger('drop');
     expect(lastEmit(wrapper, 'drop-on')).toEqual(['c-1']);
   });
 
@@ -279,7 +313,9 @@ describe('CalendarCard', () => {
 
   it('focuses the row controls in list view and never BODY', () => {
     const wrapper = mountCardAttached({ draggable: true, view: 'list' });
-    expect(document.activeElement).not.toBe(document.body);
+    const link = wrapper.find('a[data-action="open"]').element as HTMLAnchorElement;
+    link.focus();
+    expect(document.activeElement).toBe(link);
     expect(vmOf(wrapper).focusMoveControl('up')).toBe(true);
     expect(focused()).toEqual({ tag: 'BUTTON', action: 'move-up', calendar: 'c-1' });
   });

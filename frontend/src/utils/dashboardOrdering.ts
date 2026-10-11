@@ -96,3 +96,13 @@ export function orderedIds<T extends DashboardViewableCard>(
 ): string[] {
   return orderCalendars(calendars, prefs).map(c => c.id);
 }
+
+/** Move to an index in one pinned/unpinned group, without mutating the input. */
+export function moveWithinGroup(order: readonly string[], id: string, toIndex: number): string[] {
+  const next = [...order];
+  const from = next.indexOf(id);
+  if (from < 0 || !Number.isInteger(toIndex) || toIndex < 0 || toIndex >= next.length) return next;
+  const [moved] = next.splice(from, 1);
+  next.splice(toIndex, 0, moved);
+  return next;
+}
