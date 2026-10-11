@@ -14,6 +14,7 @@
 !go.mod
 !go.sum
 !go.work
+!THIRD-PARTY-LICENSES.md
 
 # ============================================
 # Directories - Required for Build

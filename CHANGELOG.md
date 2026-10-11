@@ -61,9 +61,30 @@ line per release rather than listed individually.
   exposed as `REMINDER_HOURS_BEFORE`, `REMINDER_INTERVAL`,
   `REMINDER_CATCH_UP_WINDOW`, `REMINDER_MAX_ATTEMPTS` and
   `REMINDER_RETRY_BACKOFF`.
+- **Bundled offline national holiday rules for 47 countries**, including
+  Australia, Japan and Thailand, supplied by the third-party `rickar/cal/v2`
+  library instead of the network-only `go-holidays` library. Covered countries
+  continue to recognize their bundled holidays without an internet connection.
+- **Opt-in Nager fallback**, disabled by default through
+  `HOLIDAYS_NAGER_FALLBACK_ENABLED`. For uncovered countries only, enabled
+  fallback coalesces country/year lookups in a bounded cache (24-hour successes,
+  one-minute failures), with independent two-second fetch deadlines and no
+  redirects. No public holiday lookup API is exposed.
+- **`SupportedCountries` is safe to call before any other use.** The offline
+  table's initializer now runs unconditionally inside the reader and returns a
+  defensive copy, so a caller (or a cold package raced by goroutines) can never
+  read a half-built table or corrupt it by mutating the result.
 
 ### Changed
 
+- **Holiday-policy behavior:** bundled country-level validation no longer blocks
+  regional-only holidays. A bundled holiday on a weekend is blocked on its
+  actual civil date as well as its observed substitute date (US 2026-07-04 and
+  2026-07-03 both block). Countries without bundled rules no longer get remote
+  holiday blocking unless the operator enables the fallback; disabled or
+  unavailable data fails open to ordinary weekday rules. See
+  [holiday validation](README.md#holiday-validation-and-optional-network-fallback)
+  for coverage limits and the separate frontend renderer.
 - **Breaking: public registration no longer creates the first administrator.**
   Fresh installs and deployed databases empty when migration 019 first runs must
   complete operator-key bootstrap, even with registration enabled. Read the startup logs

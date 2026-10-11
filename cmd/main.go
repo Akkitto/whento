@@ -56,6 +56,7 @@ import (
 	"github.com/whento/pkg/broadcast"
 	"github.com/whento/pkg/cache"
 	"github.com/whento/pkg/database"
+	"github.com/whento/pkg/datevalidation"
 	"github.com/whento/pkg/email"
 	"github.com/whento/pkg/jwt"
 	"github.com/whento/pkg/logger"
@@ -136,6 +137,10 @@ func run() error {
 	if err := cfg.Validate(); err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
+
+	// Process-wide startup setting: do not replace the client during shutdown
+	// while a canceled handler's bounded shared fetch may still be completing.
+	datevalidation.SetNagerFallbackEnabled(cfg.HolidaysNagerFallbackEnabled)
 
 	// The incoherences that leave one feature dead and the rest of the instance
 	// serviceable. Refusing to start over them would turn an upgrade into an

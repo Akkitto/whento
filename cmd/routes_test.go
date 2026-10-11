@@ -53,6 +53,22 @@ func testRouter(t *testing.T, rateLimitEnabled bool) chi.Router {
 	return newRouter(d, &handlers{}, spa)
 }
 
+func TestUnusedHolidayEndpointsAreNotExposed(t *testing.T) {
+	for _, limited := range []bool{false, true} {
+		router := testRouter(t, limited)
+		for _, path := range []string{
+			"/api/v1/holidays?country=fr&year=2026",
+			"/api/v1/holidays/supported",
+		} {
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("%s status = %d; want 404", path, response.Code)
+			}
+		}
+	}
+}
+
 // walkRoutes returns "METHOD /path" for every registered route, sorted.
 func walkRoutes(t *testing.T, r chi.Router) []string {
 	t.Helper()
