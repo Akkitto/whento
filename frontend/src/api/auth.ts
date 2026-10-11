@@ -42,8 +42,11 @@ export const authApi = {
   },
 
   async logout(): Promise<void> {
+    // Only the backend revocation. The local clear is the auth store's job — it
+    // runs under the cookie lock before signOut() captures the session family for
+    // the peers, so a premature clearToken() here would null the family and the
+    // other tabs could not tell this logout from an unrelated one.
     await apiClient.post<void>('/auth/logout');
-    apiClient.clearToken();
   },
 
   async getMe(): Promise<User> {
