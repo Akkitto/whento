@@ -128,6 +128,7 @@ COPY --from=builder /build/migrations-build /app/migrations
 
 # Copy entrypoint script
 COPY --from=builder /build/scripts/docker-entrypoint.sh /app/docker-entrypoint.sh
+COPY --from=builder /build/THIRD-PARTY-LICENSES.md /app/THIRD-PARTY-LICENSES.md
 RUN chmod +x /app/docker-entrypoint.sh
 
 # Create keys directory

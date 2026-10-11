@@ -65,6 +65,14 @@ func TestDockerfilesAgreeOnTheirPins(t *testing.T) {
 	root := repoRoot(t)
 	sources := readDockerfiles(t, root)
 
+	t.Run("runtime images carry third-party notices", func(t *testing.T) {
+		for _, name := range dockerfiles {
+			if !strings.Contains(sources[name], "COPY --from=builder /build/THIRD-PARTY-LICENSES.md /app/THIRD-PARTY-LICENSES.md") {
+				t.Errorf("%s omits third-party notices from the runtime image", name)
+			}
+		}
+	})
+
 	t.Run("every base image is pinned by digest", func(t *testing.T) {
 		for _, name := range dockerfiles {
 			for _, ref := range fromPattern.FindAllStringSubmatch(sources[name], -1) {
