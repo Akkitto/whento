@@ -82,7 +82,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(pub.source_ref(3), "codex/pr163-bootstrap-password")
         for number in range(4, 9):
             self.assertEqual(pub.source_ref(number),
-                             ("codex/pr163-reviewed-20261007c-" if number >= 7
+                             ("codex/pr163-reviewed-20261011-" if number >= 6
                               else "codex/pr163-reviewed-20261007-") + pub.TOPICS[number - 1][0])
             self.assertNotIn("submit-", pub.source_ref(number))
         self.assertEqual(pub.source_base(4), pub.REVIEWED_BOOTSTRAP_FOLLOWUPS)
@@ -470,6 +470,29 @@ class RealHistoryTests(unittest.TestCase):
                         self.assertEqual(lock[key], baseline_lock[key])
                     self.assertIn("'/auth/bootstrap?source=setup'", pub.read_blob(repo, source, "frontend/src/api/client.test.ts"))
 
+    def test_remaining_topics_replay_on_actual_reviewed_dashboard_without_restoring_errors(self):
+        reviewed = "1a5ebc20a1e77fb4796ccfd3fba1503ecbcbeccd"
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = self.clone(temporary)
+            # The frozen source also retains the actual submission head, so this
+            # regression survives deletion of its branch after a squash merge.
+            pub.git(repo, "merge-base", "--is-ancestor", reviewed, pub.TOPICS[5][1])
+            pub.git(repo, "checkout", "--detach", reviewed)
+            for number in (7, 8):
+                with self.subTest(topic=number):
+                    main = pub.git(repo, "rev-parse", "HEAD")
+                    candidate = Path(temporary) / f"candidate-{number}"
+                    self.prepare_locally(repo, dict(plan(number), upstream=main, prerequisite_merge=main), candidate)
+                    for path in ("frontend/src/stores/dashboard.ts", "frontend/src/components/dashboard/CalendarCard.vue",
+                                 "pkg/datevalidation/nager.go", "pkg/datevalidation/offline_holidays.go"):
+                        self.assertEqual(pub.read_blob(candidate, "HEAD", path), pub.read_blob(repo, reviewed, path))
+                    view = pub.read_blob(candidate, "HEAD", "frontend/src/views/Dashboard.vue")
+                    self.assertIn('unifiedFeedStore.error && !feedErrorIsToasted', view)
+                    reload = view.split('useAccountScopedReload(() => {', 1)[1].split('});', 1)[0]
+                    self.assertNotIn('toastStore.error', reload)
+                    self.assertIn('feedErrorIsToasted.value = false', reload)
+                    pub.git(repo, "checkout", "--detach", pub.git(candidate, "rev-parse", "HEAD"))
+
     def test_original_session_patch_conflicts_on_reviewed_bootstrap_interceptor(self):
         with tempfile.TemporaryDirectory() as temporary:
             repo = self.clone(temporary)
@@ -480,7 +503,12 @@ class RealHistoryTests(unittest.TestCase):
                                 ":(exclude)CHANGELOG.md", ":(exclude)Makefile", raw=True)
             result = pub.git(repo, "apply", "--3way", "--index", input=old_patch, check=False)
             self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(pub.git(repo, "diff", "--name-only", "--diff-filter=U"), "frontend/src/api/client.ts")
+            # Both reviewed areas need the refreshed session snapshot: the
+            # bootstrap interceptor and dashboard test lifecycle/imports.
+            self.assertEqual(
+                pub.git(repo, "diff", "--name-only", "--diff-filter=U").splitlines(),
+                ["frontend/src/api/client.ts", "frontend/src/views/Dashboard.test.ts"],
+            )
 
     def test_all_six_topics_after_reviewed_squashed_prerequisites_and_upstream_notes(self):
         for number, extra_note in itertools.product(range(3, 9), (False, True)):

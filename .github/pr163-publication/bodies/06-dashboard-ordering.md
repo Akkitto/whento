@@ -5,6 +5,8 @@ Related to #163; focused PR 6 of 8. Submit after holiday compatibility is merged
 ## Summary
 
 - Save pins, sorting and custom calendar/group ordering per authenticated user.
+- Refresh preferences across tabs and re-read before field mutations; sign-out never overwrites newer saved choices.
+- Offer feed membership in all four layouts and announce feed failures through one channel; drag grips are pointer-only, with separate keyboard move controls.
 - Add keyboard reordering, stable boundary focus and screen-reader announcements.
 - Prune obsolete preferences only after an authoritative successful load, not a transient request failure.
 - Supply an isolated dashboard preview that mocks quota reads as well as calendar/feed data and rejects unexpected network requests.
@@ -14,3 +16,7 @@ Related to #163; focused PR 6 of 8. Submit after holiday compatibility is merged
 The publication gate reruns frontend type/lint/format checks, coverage and four shuffle seeds, dashboard keyboard and desktop/mobile browser tests, real-backend tests, both Go module/build-variant race matrices and deployment builds. Successful publication runs record the verification evidence. The isolated preview rejects unexpected network requests; keyboard tests cover reordering, boundary focus and announcements.
 
 No schema migration. Preferences are browser-local `localStorage` state, not server-synchronized settings.
+Account-scoped preference metadata (calendar IDs, pins, order and view/sort choices)
+intentionally remains after sign-out for the next sign-in. In-memory state resets
+to the incoming/anonymous account; no calendar contents or authentication tokens
+are stored in these keys. Clearing browser site data removes the retained choices.

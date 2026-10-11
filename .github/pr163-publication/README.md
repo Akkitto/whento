@@ -27,6 +27,17 @@ which never executes candidate application code.
 
 ## What happens
 
+PR193 review refresh (2026-10-11): topics 6–8 use new
+`codex/pr163-reviewed-20261011-*` source snapshots. These preserve the reviewed
+cross-tab preferences, no-write sign-out, all-layout feed controls and accessible
+reordering. The session topic also resolves the shared test-import overlap and
+keeps account-reload feed failures inline without duplicating an error toast.
+Earlier snapshots remain unchanged; existing submission branches are never
+replaced by this helper. PR193 was rebased/fixed directly, not republished.
+The frozen dashboard snapshot retains the actual reviewed PR193 head as an
+additional parent, without changing its source tree. Replay tests therefore
+remain reproducible after the submission branch is deleted or squash-merged.
+
 - The first two main-based branches already exist; open their PRs using the
   status summary links. Never open duplicates for their source copies.
 - At minutes 17 and 47 each hour, read actual upstream PR merge state, including

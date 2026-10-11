@@ -32,9 +32,11 @@ TOPICS = [
     ("bootstrap-password", "06e4a94ba76c771db2e09bee945d122ed17ca3a2"),
     ("durable-reminders", "af307512a7cb4e6c92892c816b2f7c42a390dd58"),
     ("holiday-compatibility", "14a5c88b566fc19902302cd6cd8a415dc4841d35"),
-    ("dashboard-ordering", "d0d087f4252f2573723e314613aaa341f73991ae"),
-    ("session-coordination", "c50b78acd2808933f2a41f642b4704405e7c4010"),
-    ("safe-migrations", "7d23e03a723ee7896832e5bf5cef3c5e87951b5d"),
+    # Reviewed PR193 changes are frozen on the original source lineage; later
+    # topics preserve cross-tab preferences and sole feed-error announcements.
+    ("dashboard-ordering", "310cb0800be0b643a80a44d9be8393300311b385"),
+    ("session-coordination", "0e9263a08a2605d6ba3caf1b6284544ebd2be26b"),
+    ("safe-migrations", "2c154556a9bf1901ab22507316ca675cd1281d55"),
 ]
 ROOT = Path(__file__).resolve().parent
 SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -170,8 +172,8 @@ def source_base(number):
 
 def source_ref(number):
     """Select the trusted frozen ref, never a ref supplied by a plan artifact."""
-    if number >= 7:
-        prefix = "codex/pr163-reviewed-20261007c-"
+    if number >= 6:
+        prefix = "codex/pr163-reviewed-20261011-"
     elif number >= 4:
         prefix = "codex/pr163-reviewed-20261007-"
     else:
