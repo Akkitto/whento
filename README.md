@@ -389,6 +389,8 @@ Compose stack has no backend environment to forward it to.
 Opting in permits HTTPS requests to `date.nager.at` for the country code and
 year, with a bounded cache (24-hour successes, one-minute failures), a two-second
 request timeout, and no redirects. Bundled countries never use that fallback.
+For uncovered countries, the enabled fallback uses Nager's returned dates,
+including any regional entries; it does not infer a subdivision from a time zone.
 When the fallback is disabled, unsupported, or unavailable, holiday `block`
 validation **fails open to ordinary weekday rules**: unknown holidays are not
 blocked. Holiday `allow` and holiday-eve exceptions cannot grant a day without

@@ -77,7 +77,7 @@ line per release rather than listed individually.
 
 ### Changed
 
-- **Holiday-policy behavior:** country-level validation no longer blocks
+- **Holiday-policy behavior:** bundled country-level validation no longer blocks
   regional-only holidays. A bundled holiday on a weekend is blocked on its
   actual civil date as well as its observed substitute date (US 2026-07-04 and
   2026-07-03 both block). Countries without bundled rules no longer get remote
