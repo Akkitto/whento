@@ -138,8 +138,9 @@ func run() error {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
 
-	restoreHolidayFallback := datevalidation.SetNagerFallbackEnabled(cfg.HolidaysNagerFallbackEnabled)
-	defer restoreHolidayFallback()
+	// Process-wide startup setting: do not replace the client during shutdown
+	// while a canceled handler's bounded shared fetch may still be completing.
+	datevalidation.SetNagerFallbackEnabled(cfg.HolidaysNagerFallbackEnabled)
 
 	// The incoherences that leave one feature dead and the rest of the instance
 	// serviceable. Refusing to start over them would turn an upgrade into an
