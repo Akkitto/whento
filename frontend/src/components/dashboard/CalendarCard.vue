@@ -32,6 +32,7 @@
 -->
 
 <template>
+  <!-- eslint-disable-next-line vuejs-accessibility/no-static-element-interactions -- Article is a pointer drop target; labeled move buttons provide keyboard reordering. -->
   <article
     :data-calendar-id="calendar.id"
     :class="rootClass"
@@ -65,6 +66,8 @@
             ref="cardDragGrip"
             type="button"
             data-action="drag"
+            tabindex="-1"
+            aria-hidden="true"
             class="drag-grip"
             draggable="true"
             :aria-label="t('dashboard.dragHandle')"
@@ -145,7 +148,7 @@
             data-action="feed"
             :checked="feedIncluded"
             class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500 dark:border-gray-600 dark:bg-gray-700"
-            @change="emit('toggle-feed')"
+            @change="handleFeedToggle"
           />
           <span class="ml-2 text-xs text-gray-500 dark:text-gray-400">
             {{ t('unifiedFeed.includeInFeed') }}
@@ -272,6 +275,8 @@
           ref="expandedDragGrip"
           type="button"
           data-action="drag"
+          tabindex="-1"
+          aria-hidden="true"
           class="drag-grip mt-1"
           draggable="true"
           :aria-label="t('dashboard.dragHandle')"
@@ -370,7 +375,7 @@
                 data-action="feed"
                 :checked="feedIncluded"
                 class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500 dark:border-gray-600 dark:bg-gray-700"
-                @change="emit('toggle-feed')"
+                @change="handleFeedToggle"
               />
               <span class="ml-2 text-xs text-gray-500 dark:text-gray-400">
                 {{ t('unifiedFeed.includeInFeed') }}
@@ -500,6 +505,8 @@
           ref="rowDragGrip"
           type="button"
           data-action="drag"
+          tabindex="-1"
+          aria-hidden="true"
           class="drag-grip"
           draggable="true"
           :aria-label="t('dashboard.dragHandle')"
@@ -679,6 +686,21 @@
           </button>
         </div>
       </div>
+      <div v-if="unifiedFeedConfigured" class="mt-2 flex items-center" @click.stop>
+        <label :for="`unified-feed-${calendar.id}`" class="flex items-center">
+          <input
+            :id="`unified-feed-${calendar.id}`"
+            type="checkbox"
+            data-action="feed"
+            :checked="feedIncluded"
+            class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500 dark:border-gray-600 dark:bg-gray-700"
+            @change="handleFeedToggle"
+          />
+          <span class="ml-2 text-xs text-gray-500 dark:text-gray-400">
+            {{ t('unifiedFeed.includeInFeed') }}
+          </span>
+        </label>
+      </div>
     </template>
   </article>
 </template>
@@ -719,6 +741,13 @@ const emit = defineEmits<{
 const { t } = useI18n();
 
 const participantCount = computed(() => props.calendar.participants?.length || 0);
+
+function handleFeedToggle(event: Event) {
+  // Restore the controlled value until the store confirms the asynchronous update.
+  // A failed update must not leave the DOM checkbox disagreeing with membership.
+  (event.target as HTMLInputElement).checked = props.feedIncluded;
+  emit('toggle-feed');
+}
 
 /** The real destination of the card's open link, so modified clicks open it natively. */
 const openUrl = computed(() => `/c/${props.calendar.public_token}`);

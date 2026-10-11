@@ -43,9 +43,16 @@ const FABRICATED_CALENDARS = [
   { id: 'delta', name: 'Delta', public_token: 'tok-delta', participants: [] },
 ] as unknown as CalendarWithParticipants[];
 
+const query = new URLSearchParams(window.location.search);
+
 // Patch the API objects the dashboard fetches on mount so they succeed offline.
 calendarsApi.getAll = (async () => FABRICATED_CALENDARS) as typeof calendarsApi.getAll;
-unifiedFeedApi.getConfig = (async () => ({ configured: false })) as typeof unifiedFeedApi.getConfig;
+unifiedFeedApi.getConfig = (async () =>
+  query.get('feed') === '1'
+    ? { configured: true, ics_token: 'preview-only', included_calendar_ids: [] }
+    : { configured: false }) as typeof unifiedFeedApi.getConfig;
+// Explicit feed fixture for membership checks in every layout; no real API write.
+unifiedFeedApi.updateCalendars = async () => {};
 // QuotaUsage also fetches on mount. Keep the preview genuinely offline even when
 // a developer happens to have a real backend running at Vite's proxy target.
 apiClient.get = async <T>(path: string): Promise<T> => {
@@ -60,7 +67,7 @@ apiClient.get = async <T>(path: string): Promise<T> => {
 
 const i18n = createI18n({
   legacy: false,
-  locale: new URLSearchParams(window.location.search).get('lang') || 'en',
+  locale: query.get('lang') || 'en',
   fallbackLocale: 'en',
   messages: { en, fr },
 });

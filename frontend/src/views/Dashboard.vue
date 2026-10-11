@@ -78,7 +78,7 @@
 
           <!-- The store surfaces the translated failure here; it must not be lost. -->
           <p
-            v-if="unifiedFeedStore.error"
+            v-if="unifiedFeedStore.error && !feedErrorIsToasted"
             role="alert"
             class="mt-2 text-sm font-medium text-danger-600 dark:text-danger-400"
           >
@@ -385,8 +385,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
-import { nextTick } from 'vue';
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { useI18n } from 'vue-i18n';
 import { useAuthStore } from '@/stores/auth';
@@ -394,7 +393,7 @@ import { useCalendarStore } from '@/stores/calendar';
 import { useDashboardStore } from '@/stores/dashboard';
 import { useUnifiedFeedStore } from '@/stores/unifiedFeed';
 import { useToastStore } from '@/stores/toast';
-import { orderCalendars, orderedIds } from '@/utils/dashboardOrdering';
+import { moveWithinGroup, orderCalendars, orderedIds } from '@/utils/dashboardOrdering';
 import type { DashboardViewMode } from '@/stores/dashboard';
 import type { CalendarWithParticipants } from '@/types';
 import QuotaUsage from '@/components/QuotaUsage.vue';
@@ -426,6 +425,9 @@ const feedConfigured = computed(() => unifiedFeedStore.config?.configured === tr
 
 const unifiedFeedConfig = computed(() => unifiedFeedStore.config);
 const unifiedFeedLoading = computed(() => unifiedFeedStore.loading);
+// Enable failures use a toast when there is no feed; every other feed failure
+// uses the inline alert. Never announce the same failure through both channels.
+const feedErrorIsToasted = ref(false);
 const unifiedFeedUrl = computed(() => {
   if (!unifiedFeedConfig.value?.ics_token) return '';
   return `${window.location.origin}/api/v1/ics/unified/${unifiedFeedConfig.value.ics_token}.ics`;
@@ -604,7 +606,6 @@ function announceMove(id: string, direction: 'up' | 'down' | 'drop') {
  * the calendar landed.
  */
 async function moveCalendar(id: string, direction: 'up' | 'down') {
-  const pinned = dashboardStore.pinnedIds.includes(id);
   const group = groupOrderIds(id);
   const from = group.indexOf(id);
   if (from === -1) return;
@@ -612,17 +613,7 @@ async function moveCalendar(id: string, direction: 'up' | 'down') {
   // Boundary: nothing within this group to swap with.
   if (to < 0 || to >= group.length) return;
 
-  const nextGroup = [...group];
-  const [moved] = nextGroup.splice(from, 1);
-  nextGroup.splice(to, 0, moved);
-
-  // Rebuild the global sequence with this group's segment replaced in place; the
-  // other group keeps its relative order.
-  const other = orderedCalendars.value
-    .filter(c => dashboardStore.pinnedIds.includes(c.id) !== pinned)
-    .map(c => c.id);
-  const next = pinned ? [...nextGroup, ...other] : [...other, ...nextGroup];
-  dashboardStore.setCustomOrder(next);
+  persistGroupMove(id, to);
   announceMove(id, direction);
   await nextTick();
   focusCardAfterMove(id, direction);
@@ -664,6 +655,16 @@ function groupOrderIds(id: string): string[] {
     .map(c => c.id);
 }
 
+/** Shared keyboard/drop path: replace only this group, preserving the other group. */
+function persistGroupMove(id: string, toIndex: number) {
+  const pinned = dashboardStore.pinnedIds.includes(id);
+  const nextGroup = moveWithinGroup(groupOrderIds(id), id, toIndex);
+  const other = orderedCalendars.value
+    .filter(c => dashboardStore.pinnedIds.includes(c.id) !== pinned)
+    .map(c => c.id);
+  dashboardStore.setCustomOrder(pinned ? [...nextGroup, ...other] : [...other, ...nextGroup]);
+}
+
 // --- Drag and drop reordering ---------------------------------------------------
 
 const draggingId = ref<string | null>(null);
@@ -696,16 +697,8 @@ async function onDropOn(targetId: string) {
   const to = group.indexOf(targetId);
   if (from === -1 || to === -1) return;
 
-  const nextGroup = [...group];
-  const [moved] = nextGroup.splice(from, 1);
-  const targetIndex = nextGroup.indexOf(targetId);
-  nextGroup.splice(targetIndex, 0, moved);
-
-  const other = orderedCalendars.value
-    .filter(c => dashboardStore.pinnedIds.includes(c.id) !== sourcePinned)
-    .map(c => c.id);
-  const next = sourcePinned ? [...nextGroup, ...other] : [...other, ...nextGroup];
-  dashboardStore.setCustomOrder(next);
+  // Drop inserts before the target, accounting for the source's removal.
+  persistGroupMove(sourceId, to - (from < to ? 1 : 0));
   announceMove(sourceId, 'drop');
   await nextTick();
   focusCardAfterMove(sourceId, 'auto');
@@ -729,33 +722,35 @@ function copyUnifiedFeedUrl() {
 }
 
 async function enableUnifiedFeed() {
+  feedErrorIsToasted.value = false;
   try {
     await unifiedFeedStore.createFeed();
   } catch {
-    // The store remembers the translated failure (rendered above); spell it out too,
-    // because the enable button only appears when there is no feed to show.
+    // There is no feed to show yet. Deliver this failure through the toast alone.
+    feedErrorIsToasted.value = true;
     toastStore.error(unifiedFeedStore.error ?? t('errors.unexpected'));
   }
 }
 
 async function regenerateUnifiedFeedToken() {
   if (!confirm(t('unifiedFeed.regenerateConfirm'))) return;
+  feedErrorIsToasted.value = false;
   try {
     await unifiedFeedStore.regenerateToken();
     toastStore.success(t('unifiedFeed.tokenRegenerated'));
   } catch {
-    toastStore.error(unifiedFeedStore.error ?? t('errors.unexpected'));
+    // The store's inline alert is the sole error announcement.
   }
 }
 
 /** Toggle a calendar's feed membership, surfacing a failure instead of dropping it. */
 async function toggleFeed(calendarId: string) {
+  feedErrorIsToasted.value = false;
   try {
     await unifiedFeedStore.toggleCalendar(calendarId);
   } catch {
     // The inline error above shows the translated message; this catches what would
     // otherwise be an unhandled rejection from the fire-and-forget checkbox.
-    toastStore.error(unifiedFeedStore.error ?? t('errors.unexpected'));
   }
 }
 
@@ -772,8 +767,6 @@ onMounted(() => {
   loadCalendars();
   // The mount-time config read feeds the inline error; it must not also end up as an
   // unhandled rejection in the global handler.
-  unifiedFeedStore.fetchConfig().catch(() => {
-    toastStore.error(unifiedFeedStore.error ?? t('errors.unexpected'));
-  });
+  unifiedFeedStore.fetchConfig().catch(() => {});
 });
 </script>

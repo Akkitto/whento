@@ -7,7 +7,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createPinia, setActivePinia } from 'pinia';
+import { createPinia, disposePinia, setActivePinia } from 'pinia';
 import { flushPromises } from '@vue/test-utils';
 import { nextTick } from 'vue';
 import type { CalendarWithParticipants, User } from '@/types';
@@ -75,6 +75,10 @@ function calendar(id: string, name: string, extra: Partial<CalendarWithParticipa
 }
 
 const USER = { id: 'u-1', display_name: 'Owner' } as unknown as User;
+const mountedPinia: ReturnType<typeof createPinia>[] = [];
+afterEach(() => {
+  for (const pinia of mountedPinia.splice(0)) disposePinia(pinia);
+});
 
 async function mountDashboard(
   list: CalendarWithParticipants[],
@@ -83,6 +87,7 @@ async function mountDashboard(
   options: { user?: User | null; attach?: boolean } = {}
 ) {
   const pinia = createPinia();
+  mountedPinia.push(pinia);
   setActivePinia(pinia);
   calendarsApi.getAll.mockResolvedValue(list);
   configureFeed();
@@ -249,7 +254,7 @@ describe('Dashboard.vue — my calendars', () => {
     // Drive the actual DOM path — dragstart on the source grip, drop on the target
     // card root — rather than synthesising the component's internal events.
     await grip.trigger('dragstart');
-    await byId(wrapper, 'c').trigger('drop');
+    await byId(wrapper, 'c').find('article').trigger('drop');
     await nextTick();
 
     expect(renderedIds(wrapper)).toEqual(['b', 'a', 'c']);
@@ -274,7 +279,7 @@ describe('Dashboard.vue — my calendars', () => {
     // regrouped rendering would show no change, so it must not silently rewrite the
     // persisted sequence either.
     await byId(wrapper, 'a').find('.drag-grip').trigger('dragstart');
-    await byId(wrapper, 'b').trigger('drop');
+    await byId(wrapper, 'b').find('article').trigger('drop');
     await nextTick();
     expect(renderedIds(wrapper)).toEqual(['a', 'b', 'c']);
     expect(dashboardStore.customOrder).toEqual(persistedBefore);
@@ -282,7 +287,7 @@ describe('Dashboard.vue — my calendars', () => {
     // And the reverse direction — unpinned "Bravo" onto pinned "Alpha" — is rejected
     // the same way.
     await byId(wrapper, 'b').find('.drag-grip').trigger('dragstart');
-    await byId(wrapper, 'a').trigger('drop');
+    await byId(wrapper, 'a').find('article').trigger('drop');
     await nextTick();
     expect(renderedIds(wrapper)).toEqual(['a', 'b', 'c']);
     expect(dashboardStore.customOrder).toEqual(persistedBefore);
@@ -424,6 +429,8 @@ describe('Dashboard.vue — my calendars', () => {
     );
 
     expect(wrapper.text()).toContain('Failed to load the unified feed');
+    expect(wrapper.findAll('[role="alert"]')).toHaveLength(1);
+    expect(useToastStore().toasts.filter(t => t.type === 'error')).toEqual([]);
     wrapper.unmount();
   });
 
@@ -444,10 +451,12 @@ describe('Dashboard.vue — my calendars', () => {
         t => t.type === 'error' && t.message === 'Failed to create the unified feed'
       )
     ).toBe(true);
+    expect(toastStore.toasts.filter(t => t.type === 'error')).toHaveLength(1);
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false);
     wrapper.unmount();
   });
 
-  it('toasts a unified-feed toggle failure instead of an unhandled rejection', async () => {
+  it('announces a feed toggle failure inline without an error toast or unhandled rejection', async () => {
     const wrapper = await mountDashboard([calendar('a', 'Alpha')], () =>
       unifiedFeedApi.getConfig.mockResolvedValue({
         configured: true,
@@ -461,12 +470,37 @@ describe('Dashboard.vue — my calendars', () => {
     await wrapper.find('input[type="checkbox"]').setValue(true);
     await flushPromises();
 
-    expect(
-      toastStore.toasts.some(
-        t => t.type === 'error' && t.message === 'Failed to update the unified feed calendars'
-      )
-    ).toBe(true);
+    expect(wrapper.findAll('[role="alert"]')).toHaveLength(1);
+    expect(wrapper.find('[role="alert"]').text()).toBe(
+      'Failed to update the unified feed calendars'
+    );
+    expect(toastStore.toasts.filter(t => t.type === 'error')).toEqual([]);
+    expect((wrapper.find('input[type="checkbox"]').element as HTMLInputElement).checked).toBe(
+      false
+    );
     wrapper.unmount();
+  });
+
+  it('announces a token regeneration failure inline without an error toast', async () => {
+    const wrapper = await mountDashboard([calendar('a', 'Alpha')], () =>
+      unifiedFeedApi.getConfig.mockResolvedValue({
+        configured: true,
+        ics_token: 't',
+        included_calendar_ids: [],
+      } as never)
+    );
+    unifiedFeedApi.regenerateToken.mockRejectedValue(new Error('offline'));
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    try {
+      await wrapper.find('button[title="Regenerate"]').trigger('click');
+      await flushPromises();
+      expect(wrapper.findAll('[role="alert"]')).toHaveLength(1);
+      expect(wrapper.find('[role="alert"]').text()).toContain('Failed to regenerate');
+      expect(useToastStore().toasts.filter(t => t.type === 'error')).toEqual([]);
+    } finally {
+      confirm.mockRestore();
+      wrapper.unmount();
+    }
   });
 });
 
@@ -540,7 +574,7 @@ describe('Dashboard.vue — keyboard focus after reorder (S3 regression)', () =>
     const wrapper = await mountFocusable();
     await setSort(wrapper, 'custom');
     await byId(wrapper, 'a').find('.drag-grip').trigger('dragstart');
-    await byId(wrapper, 'c').trigger('drop');
+    await byId(wrapper, 'c').find('article').trigger('drop');
     await flushPromises();
 
     expect(renderedIds(wrapper)).toEqual(['b', 'a', 'c', 'd']);

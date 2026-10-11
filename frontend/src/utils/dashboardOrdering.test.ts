@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import {
   orderCalendars,
   orderedIds,
+  moveWithinGroup,
   type DashboardOrderingPrefs,
   type DashboardViewableCard,
 } from './dashboardOrdering';
@@ -102,5 +103,23 @@ describe('orderCalendars', () => {
 describe('orderedIds', () => {
   it('returns the display ids in order', () => {
     expect(orderedIds(cards, prefs())).toEqual(['alpha', 'beta', 'mid', 'zeta']);
+  });
+});
+
+describe('moveWithinGroup', () => {
+  it('moves in both directions without mutating the group', () => {
+    const order = ['a', 'b', 'c'];
+    expect(moveWithinGroup(order, 'a', 2)).toEqual(['b', 'c', 'a']);
+    expect(moveWithinGroup(order, 'c', 0)).toEqual(['c', 'a', 'b']);
+    expect(order).toEqual(['a', 'b', 'c']);
+  });
+
+  it('leaves missing sources and out-of-group destinations unchanged', () => {
+    const order = ['a', 'b'];
+    expect(moveWithinGroup(order, 'missing', 0)).toEqual(order);
+    for (const index of [-1, 2, 0.5, NaN]) {
+      expect(moveWithinGroup(order, 'a', index)).toEqual(order);
+    }
+    expect(moveWithinGroup([], 'a', 0)).toEqual([]);
   });
 });
