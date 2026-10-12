@@ -179,14 +179,6 @@
       "count": 33
     }
   },
-  "src/views/Dashboard.vue": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 3
-    },
-    "no-console": {
-      "count": 3
-    }
-  },
   "src/views/Login.vue": {
     "@typescript-eslint/no-explicit-any": {
       "count": 3
