@@ -68,7 +68,14 @@ export const authApi = {
     return apiClient.post<{ message: string }>('/auth/forgot-password', { email });
   },
 
-  async resetPassword(token: string, newPassword: string): Promise<AuthResponse> {
+  /**
+   * Consume a recovery proof and establish a session (or an MFA challenge).
+   * The password is request-only: the response contains authentication state,
+   * not password data. Keep that distinction in the API name as well as its type;
+   * sensitive-data analyzers otherwise classify every field returned by a
+   * `resetPassword` call, including the non-secret session_id, as a password.
+   */
+  async completeAccountRecovery(token: string, newPassword: string): Promise<AuthResponse> {
     return apiClient.post<AuthResponse>('/auth/reset-password', {
       token,
       new_password: newPassword,

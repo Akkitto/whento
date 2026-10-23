@@ -49,6 +49,7 @@ vi.mock('@/router', () => ({
 }));
 
 const { apiClient, ApiClient } = await import('./client');
+const { authApi } = await import('./auth');
 
 /** Reach the private axios instance so a fake adapter can stand in for the network. */
 function instance(): AxiosInstance {
@@ -190,6 +191,73 @@ describe('apiClient', () => {
   });
 
   describe('tokens', () => {
+    it.each([false, true])(
+      'persists only non-secret recovery metadata through sign-out (MFA: %s)',
+      async requireMfa => {
+        const recoveryProof = 'r'.repeat(64);
+        const newPassword = 'Recovery-only-password!42';
+        const family = '4bafab71-cd3f-4926-a0b5-c119c234e371';
+        const accessToken = 'recovery-access-token';
+        const refreshToken = 'recovery-refresh-token';
+        const tempToken = 'recovery-mfa-challenge';
+        const writes = vi.spyOn(Storage.prototype, 'setItem');
+        const response = requireMfa
+          ? { require_mfa: true, temp_token: tempToken }
+          : {
+              access_token: accessToken,
+              refresh_token: refreshToken,
+              expires_in: 900,
+              session_id: family,
+              // Even an unexpected secret field echoed by a faulty server must
+              // not be serialized along with the session metadata.
+              new_password: newPassword,
+            };
+        withAdapter(config => {
+          expect(config.url).toBe('/auth/reset-password');
+          expect(JSON.parse(config.data as string)).toEqual({
+            token: recoveryProof,
+            new_password: newPassword,
+          });
+          return ok(response);
+        });
+
+        await expect(authApi.completeAccountRecovery(recoveryProof, newPassword)).resolves.toEqual(
+          response
+        );
+        expect(apiClient.getFamilyId()).toBe(requireMfa ? null : family);
+        expect(apiClient.hasSession()).toBe(!requireMfa);
+        apiClient.signOut();
+
+        // Inspect every write, not just the final snapshot: a transient write
+        // followed by removeItem would still expose a password or token.
+        expect(writes.mock.calls).toEqual(
+          requireMfa
+            ? []
+            : [
+                ['whento.activeFamily', family],
+                ['whento.session', '1'],
+                ['whento.loggedOutFamily', family],
+              ]
+        );
+        for (const secret of [newPassword, recoveryProof, accessToken, refreshToken, tempToken]) {
+          expect(writes.mock.calls.some(([, value]) => value.includes(secret))).toBe(false);
+          expect(Object.values(localStorage)).not.toContain(secret);
+          expect(Object.values(sessionStorage)).not.toContain(secret);
+        }
+      }
+    );
+
+    it('does not persist recovery data when the proof is rejected', async () => {
+      const writes = vi.spyOn(Storage.prototype, 'setItem');
+      withAdapter(() => unauthorized());
+
+      await expect(
+        authApi.completeAccountRecovery('rejected-proof', 'Unstored-password!42')
+      ).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
+      expect(writes).not.toHaveBeenCalled();
+      expect(apiClient.hasSession()).toBe(false);
+    });
+
     it.each([
       '/auth/login',
       '/auth/register',

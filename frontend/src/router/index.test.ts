@@ -21,7 +21,7 @@ const authApi = {
   updateProfile: vi.fn(),
   updatePassword: vi.fn(),
   forgotPassword: vi.fn(),
-  resetPassword: vi.fn(),
+  completeAccountRecovery: vi.fn(),
 };
 
 const apiClient = {

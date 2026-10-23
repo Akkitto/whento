@@ -46,7 +46,7 @@ const authApi = {
   updatePassword: vi.fn(),
   logout: vi.fn(),
   forgotPassword: vi.fn(),
-  resetPassword: vi.fn(),
+  completeAccountRecovery: vi.fn(),
   checkMagicLinkAvailable: vi.fn(),
 };
 const apiClient = {

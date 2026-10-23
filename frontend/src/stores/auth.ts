@@ -292,7 +292,7 @@ export const useAuthStore = defineStore('auth', () => {
 
   async function resetPassword(token: string, newPassword: string) {
     return run('auth.resetPassword.error', async () => {
-      const response = await authApi.resetPassword(token, newPassword);
+      const response = await authApi.completeAccountRecovery(token, newPassword);
 
       // An MFA-protected account gets a pending challenge from a reset, not a
       // session: the password has been changed, but the login must not complete

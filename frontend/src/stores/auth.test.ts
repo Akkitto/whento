@@ -21,7 +21,7 @@ const authApi = {
   updateProfile: vi.fn(),
   updatePassword: vi.fn(),
   forgotPassword: vi.fn(),
-  resetPassword: vi.fn(),
+  completeAccountRecovery: vi.fn(),
 };
 
 const apiClient = {
@@ -540,7 +540,7 @@ describe('auth store', () => {
     });
 
     it('signs the user in after a password reset', async () => {
-      authApi.resetPassword.mockResolvedValue(authResponse({ access_token: 'fresh' }));
+      authApi.completeAccountRecovery.mockResolvedValue(authResponse({ access_token: 'fresh' }));
       const store = freshStore();
 
       await store.resetPassword('reset-token', 'new-password');
@@ -550,7 +550,7 @@ describe('auth store', () => {
     });
 
     it('does not sign the user in when the reset requires MFA', async () => {
-      authApi.resetPassword.mockResolvedValue({
+      authApi.completeAccountRecovery.mockResolvedValue({
         require_mfa: true,
         temp_token: 'reset-pending',
       } as never);
