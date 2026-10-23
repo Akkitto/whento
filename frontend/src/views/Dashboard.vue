@@ -399,6 +399,7 @@ import type { CalendarWithParticipants } from '@/types';
 import QuotaUsage from '@/components/QuotaUsage.vue';
 import CalendarCard from '@/components/dashboard/CalendarCard.vue';
 import { translateErrorMessage } from '@/utils/errorTranslator';
+import { useAccountScopedReload } from '@/composables/useAccountScopedReload';
 
 const router = useRouter();
 const { t } = useI18n();
@@ -407,6 +408,16 @@ const calendarStore = useCalendarStore();
 const dashboardStore = useDashboardStore();
 const unifiedFeedStore = useUnifiedFeedStore();
 const toastStore = useToastStore();
+
+// A remote account replacement (or a refresh that discovered a different server
+// family) advances the local account generation, not a document reload (the loop
+// this PR removes). Clear and reload this account's own data instead.
+useAccountScopedReload(() => {
+  void loadCalendars();
+  // A restored account's config failure has the same sole inline alert as mount.
+  feedErrorIsToasted.value = false;
+  void unifiedFeedStore.fetchConfig().catch(() => {});
+});
 
 const user = computed(() => authStore.user);
 const calendars = computed(() => {

@@ -288,11 +288,18 @@ import { useToastStore } from '@/stores/toast';
 import { adminApi } from '@/api/admin';
 import type { User } from '@/types';
 import { translateErrorMessage } from '@/utils/errorTranslator';
+import { useAccountScopedReload } from '@/composables/useAccountScopedReload';
 
 const { t } = useI18n();
 const router = useRouter();
 const authStore = useAuthStore();
 const toastStore = useToastStore();
+
+// A remote account replacement advances the account generation, not a document
+// reload; the admin list is account-scoped admin data, so reload it in place.
+useAccountScopedReload(() => {
+  void loadUsers();
+});
 
 const loading = ref(true);
 const users = ref<User[]>([]);

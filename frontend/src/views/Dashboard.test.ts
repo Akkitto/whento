@@ -8,11 +8,14 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, disposePinia, setActivePinia } from 'pinia';
-import { flushPromises } from '@vue/test-utils';
+import { enableAutoUnmount, flushPromises } from '@vue/test-utils';
 import { nextTick } from 'vue';
+import { bumpAccountGeneration } from '@/accountFence';
 import type { CalendarWithParticipants, User } from '@/types';
 
 import { mountWithI18n } from '@/test/harness';
+
+enableAutoUnmount(afterEach);
 
 const routerPush = vi.fn();
 
@@ -43,7 +46,7 @@ const authApi = {
   updatePassword: vi.fn(),
   logout: vi.fn(),
   forgotPassword: vi.fn(),
-  resetPassword: vi.fn(),
+  completeAccountRecovery: vi.fn(),
   checkMagicLinkAvailable: vi.fn(),
 };
 const apiClient = {
@@ -145,6 +148,19 @@ beforeEach(() => {
 });
 
 describe('Dashboard.vue — my calendars', () => {
+  it('reloads each account-scoped resource exactly once after a replacement', async () => {
+    const wrapper = await mountDashboard([calendar('a', 'Alpha')]);
+    calendarsApi.getAll.mockClear();
+    unifiedFeedApi.getConfig.mockClear();
+
+    bumpAccountGeneration();
+    await flushPromises();
+
+    expect(calendarsApi.getAll).toHaveBeenCalledTimes(1);
+    expect(unifiedFeedApi.getConfig).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
   it('renders calendars alphabetically ascending by default', async () => {
     const wrapper = await mountDashboard([
       calendar('z', 'Zebra'),
@@ -420,6 +436,25 @@ describe('Dashboard.vue — my calendars', () => {
     authStore.user = null;
     await nextTick();
     expect(persisted()).toMatchObject({ pinnedIds: ['a'] });
+    wrapper.unmount();
+  });
+
+  it('announces an account-reload feed failure inline without duplicating its toast', async () => {
+    const wrapper = await mountDashboard([calendar('a', 'Alpha')]);
+    unifiedFeedApi.create.mockRejectedValue(new Error('offline'));
+    await wrapper
+      .findAll('button')
+      .find(b => b.text() === 'Enable Unified Feed')!
+      .trigger('click');
+    await flushPromises();
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false);
+    useToastStore().toasts = [];
+    unifiedFeedApi.getConfig.mockRejectedValue(new Error('offline'));
+    bumpAccountGeneration();
+    await flushPromises();
+    expect(wrapper.findAll('[role="alert"]')).toHaveLength(1);
+    expect(wrapper.find('[role="alert"]').text()).toBe('Failed to load the unified feed');
+    expect(useToastStore().toasts.filter(t => t.type === 'error')).toEqual([]);
     wrapper.unmount();
   });
 
