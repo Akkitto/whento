@@ -4,6 +4,12 @@ WhenTo uses a conditional migration system to support both Cloud (SaaS) and Self
 
 ## Structure
 
+The migration wrappers require **Bash 4 or newer**. Creation and release-binary
+installation also require **GNU find and ln** (Linux/devcontainer). Unsupported
+shells fail before reading database configuration; creation/installation check
+their tools before writing. The standalone chain builder remains POSIX `sh`
+compatible, including BusyBox.
+
 ```
 migrations/
 ├── common/          # Migrations applied to both cloud and selfhosted
@@ -49,15 +55,6 @@ BUILD_TYPE=cloud make migrate-status
 
 # Rollback
 BUILD_TYPE=selfhosted make migrate-down
-```
-
-### All Migrations (Legacy)
-
-If you need to apply all migrations (not recommended for production):
-
-```bash
-make migrate-up-all
-make migrate-status-all
 ```
 
 ## Adding New Migrations
@@ -111,16 +108,13 @@ echo "Next free version: $((10#$highest + 1))"
 ```
 `scripts/migrate.sh create <variant> <name>` also picks the next number for you
 by seeding a private staging directory with the global numeric maximum before
-calling golang-migrate's `-seq`. Calling `migrate create -seq` directly in a
-variant directory is unsafe: it ignores the common chain. The wrapper serializes
+calling golang-migrate's `-seq -digits 3` (for example, `022_name.up.sql`). Calling
+`migrate create -seq` directly in a variant directory is unsafe: it ignores the
+common chain. The wrapper serializes
 creation and publishes the new pair without overwriting existing files or
 symlinks. If a creator is forcibly killed, inspect and remove the empty
 `migrations/.create-lock` directory before retrying. The check above is just a
 sanity read for reviews.
-
-> These numbers apply to **this repository's chain**. The fork that preceded this
-> split used its own renumbered history; do not copy fork numbers into this
-> README or expect them to match upstream's published chain.
 
 ## Testing
 
@@ -166,7 +160,9 @@ sentinel user/calendar records and verify preservation and bootstrap backfill.
 ## Local environment syntax
 
 Migration scripts read `.env` from the working directory as data, not executable
-shell code. Existing environment variables take precedence. File assignments
+shell code. Source migration paths are resolved relative to the scripts, so the
+wrapper may also be invoked from outside the repository root. Existing
+environment variables take precedence. File assignments
 may have leading whitespace, optional `export`, or spaces around `=`; duplicate
 keys use the last assignment. Single-quoted values are literal. Double-quoted
 values support `\n`, `\r`, `\t`, `\"`, `\\`, and `\$`; other escapes are preserved.
@@ -178,3 +174,35 @@ values or partially exporting the file.
 An explicit `DATABASE_URL` is passed unchanged; otherwise credentials and the
 database name from `DB_*` are UTF-8 byte-wise percent-encoded. Logged PostgreSQL
 URIs redact userinfo and query-string `password`/`sslpassword` values.
+
+These dotenv rules apply when invoking the scripts **directly**. `make` first
+loads `.env` with GNU Make's `-include` and exports its values; Make preserves
+quotes literally, and that exported environment takes precedence in the wrapper.
+For example, `DB_PASSWORD='quoted'` becomes `quoted` in a direct script invocation
+but includes the single quotes via Make. For quoted values or literal `$`/`#`
+characters, invoke the script directly, or supply the correctly decoded value in
+a Make command-line variable (for example, `make migrate-status DB_PASSWORD=quoted`)
+rather than relying on Make's dotenv include. Make file assignments override
+inherited environment values by default; command-line variables override the file.
+The wrapper itself does not re-interpret existing environment values.
+
+## Installing the CLI
+
+`bash scripts/migrate.sh install-migrate` downloads and verifies the pinned
+Linux x86_64 release into `$HOME/.local/bin/migrate`. Use
+`MIGRATE_INSTALL_DIR=/your/bin` to choose another persistent directory. Existing
+files, directories and symlinks named `migrate` are never replaced. Staging is
+private and on the same filesystem as the destination; installation does not
+require a database or a pre-existing CLI, and does not install into `$TMPDIR`.
+Add the directory to `PATH` or set `MIGRATE_BIN` to the installed path.
+
+Other platforms must build the pinned CLI with Go:
+
+```bash
+go install -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@v4.19.1
+```
+
+When changing the release version, update the version/archive checksum together
+in `.github/workflows/ci.yml`, `scripts/migrate.sh` and the installer assertions in
+`scripts/test-migrations.sh`. See also the repository-wide tool pins in
+[`docs/development.md`](../docs/development.md).

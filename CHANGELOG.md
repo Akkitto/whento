@@ -120,7 +120,8 @@ line per release rather than listed individually.
   failure and signals — never the shared `./migrations-build`. `reset` requires
   explicit database confirmation: interactive (type the
   exact connected database name, shown redacted with its identity) or
-  non-interactive `--yes --confirm-database <exact-name>` that must equal
+  non-interactive `--yes --confirm-database <exact-name>` (also accepting
+  `--confirm-database=<exact-name>`) that must equal
   `current_database()`. Explicit `down [N]` is destructive and does not prompt.
   A reset on an instance that was never initialized
   skips `down -all`; a failed `down` stops before any `up`; `status` reports a
@@ -130,7 +131,13 @@ line per release rather than listed individually.
   `BUILD_TYPE` before touching its output and refuses to write into a
   non-empty directory. Install help points at the pinned golang-migrate
   release v4.19.1 (same as CI), not the stale `x/tools/cmd/migrate` alias, and
-  `scripts/migrate.sh install-migrate` fetches it by checksum.
+  `scripts/migrate.sh install-migrate` fetches it by checksum on Linux x86_64
+  into `$HOME/.local/bin/migrate` (override with `MIGRATE_INSTALL_DIR`), without
+  overwriting existing destinations. Failed chain assembly stops before invoking
+  the CLI; source paths work independently of the caller's working directory.
+  Creation uses three-digit sequence prefixes. Wrappers reject Bash < 4 before
+  loading configuration; create/install require GNU find and ln, while the chain
+  builder remains BusyBox/POSIX `sh` compatible.
 
 ### Changed
 

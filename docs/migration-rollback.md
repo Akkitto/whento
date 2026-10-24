@@ -212,6 +212,7 @@ So:
 None of the above applies to a development database. There,
 `make migrate-down` (`BUILD_TYPE=selfhosted` by default) reverts one step through
 the guarded [`scripts/migrate.sh`](../scripts/migrate.sh) wrapper (which assembles
-the chain into a disposable scratch directory and requires consent for
-destructive `down`/`reset`), and `make migrate-status` prints the current
+the chain into a disposable scratch directory). `down [N]` is an explicitly
+destructive rollback and does not prompt; only `reset` requires exact database-name
+confirmation. `make migrate-status` prints the current
 version. See [`migrations/README.md`](../migrations/README.md).

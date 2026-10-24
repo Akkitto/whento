@@ -252,9 +252,7 @@ migrate-reset:
 migrate-status:
 	@bash scripts/migrate.sh --build-type $(BUILD_TYPE) status
 
-# Removed in PR 8: the old target built into a shared ./migrations-build dir and
-# deleted it with rm -rf. The wrapper owns its scratch dir now; there is nothing
-# to pre-build.
+# The wrapper owns its scratch directory; no shared chain needs pre-building.
 migrate-build:
 	@echo "migrate-build was removed: scripts/migrate.sh assembles its own scratch chain per run." >&2
 	@exit 2

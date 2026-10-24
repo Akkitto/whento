@@ -87,7 +87,22 @@ make dev-fullstack
 ```
 
 `make` auto-loads `.env` (`-include .env` plus `export`), which is where the
-`migrate-*` targets get `DATABASE_URL`.
+`migrate-*` targets get `DATABASE_URL`. Make preserves quotes literally; for
+quoted dotenv values use the direct migration wrapper or decoded Make command-line
+variables; Make file assignments override inherited environment values by default.
+See the [dotenv rules and
+limitations](../migrations/README.md#local-environment-syntax).
+
+Migration wrappers require Bash >= 4; creation and binary installation additionally
+require GNU find and ln. Use Linux/the devcontainer, or install compatible tools;
+macOS's bundled Bash 3.2 is refused before any database configuration is read.
+The chain builder itself still works under POSIX/BusyBox `sh`.
+
+On Linux x86_64, `bash scripts/migrate.sh install-migrate` installs a verified
+v4.19.1 release to `$HOME/.local/bin/migrate` (override with `MIGRATE_INSTALL_DIR`).
+It never replaces an existing destination. On other platforms use the Go install
+command above. Release version/archive checksum bumps must update `ci.yml`,
+`scripts/migrate.sh` and `scripts/test-migrations.sh` together.
 
 ### `make hooks` is opt-in, once per clone
 
