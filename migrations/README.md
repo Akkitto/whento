@@ -179,10 +179,10 @@ These dotenv rules apply when invoking the scripts **directly**. `make` first
 loads `.env` with GNU Make's `-include` and exports its values; Make preserves
 quotes literally, and that exported environment takes precedence in the wrapper.
 For example, `DB_PASSWORD='quoted'` becomes `quoted` in a direct script invocation
-but includes the single quotes via Make. For quoted values or literal `$`/`#`
-characters, invoke the script directly, or supply the correctly decoded value in
-a Make command-line variable (for example, `make migrate-status DB_PASSWORD=quoted`)
-rather than relying on Make's dotenv include. Make file assignments override
+but includes the single quotes via Make. For literal `$`/`#` characters or complex
+quoted values, invoke the script directly: Make also expands `$` in command-line
+variable values. For simple quoted values, a decoded command-line override such as
+`make migrate-status DB_PASSWORD=quoted` avoids the dotenv include. Make file assignments override
 inherited environment values by default; command-line variables override the file.
 The wrapper itself does not re-interpret existing environment values.
 
