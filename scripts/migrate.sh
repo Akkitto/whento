@@ -19,8 +19,8 @@
 #                                  from a real error
 #   reset                          consent required; down -all (unless the
 #                                  instance was never initialized) then up
-#   create <variant> <name>        variant: common|cloud|selfhosted (default
-#                                  common); writes into migrations/<variant>
+#   create <variant> <name>        variant: common|cloud|selfhosted;
+#                                  writes into migrations/<variant>
 #   install-migrate                fetch the pinned golang-migrate release
 #
 # Options:
@@ -35,7 +35,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=./migration-common.sh
 # shellcheck disable=SC1091
-. "$SCRIPT_DIR/migration-common.sh"
+. "$SCRIPT_DIR/migration-common.sh" || exit $?
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 BUILD_TYPE="${BUILD_TYPE:-selfhosted}"
 MIGRATE_BIN="${MIGRATE_BIN:-migrate}"
@@ -55,8 +56,7 @@ Commands:
   reset                   Rebuild the schema: explicit consent, then down -all
                           (unless the instance was never initialized), then up.
   create <variant> <name> Create a fresh numbered migration pair (up/down) under
-                          migrations/<variant>. Variant: common|cloud|selfhosted,
-                          defaults to common.
+                          migrations/<variant>. Variant: common|cloud|selfhosted.
   install-migrate         Download the pinned golang-migrate binary (v4.19.1).
 
 Options:
@@ -64,12 +64,16 @@ Options:
   --migrate-bin <path>             Path to the migrate binary (MIGRATE_BIN env).
   --yes --confirm-database <name>  Noninteractive reset consent: name must match
                                    the connected database exactly.
+                                   --confirm-database=<name> is also accepted.
   -h, --help                       Show this help.
 
 The wrapper assembles the migration chain into its own mktemp scratch directory
 and removes only that directory afterwards; it never deletes a shared build path.
 golang-migrate is the pinned v4.19.1 release used by CI — not the
 golang.org/x/tools/cmd/migrate alias. See `install-migrate`.
+The wrappers require Bash >= 4; create/install also require GNU find and ln.
+The installer supports Linux x86_64 and writes to MIGRATE_INSTALL_DIR
+(default: $HOME/.local/bin), refusing to replace an existing migrate binary.
 EOF
 }
 
@@ -104,6 +108,14 @@ parse_args() {
                 fi
                 CONFIRM_DB="$2"
                 shift 2
+                ;;
+            --confirm-database=*)
+                CONFIRM_DB="${1#*=}"
+                if [ -z "$CONFIRM_DB" ]; then
+                    echo 'error: --confirm-database needs a value' >&2
+                    exit 2
+                fi
+                shift
                 ;;
             -h | --help)
                 usage
@@ -142,17 +154,28 @@ check_migrate_bin() {
         echo "Install the pinned release (v4.19.1) with: scripts/migrate.sh install-migrate" >&2
         exit 1
     fi
+    # create changes to the repository root. Keep a caller-relative executable
+    # path bound to the executable that was actually checked above.
+    case "$MIGRATE_BIN" in
+        /*) ;;
+        */*) MIGRATE_BIN="$PWD/$MIGRATE_BIN" ;;
+    esac
 }
 
 # scratch_migrations_dir builds the assembled chain into a fresh mktemp directory
 # and echoes its path. The caller must run with `( ... )` or trap; run_db_cmd owns
 # cleanup.
-scratch_migrations_dir() {
-    local dir
-    dir="$(mktemp -d "${TMPDIR:-/tmp}/whento-migrations.XXXXXX")"
-    bash "$SCRIPT_DIR/build-migrations.sh" "$BUILD_TYPE" "$dir" >&2
+scratch_migrations_dir() (
+    dir="$(mktemp -d "${TMPDIR:-/tmp}/whento-migrations.XXXXXX")" || exit $?
+    trap 'rm -rf -- "$dir"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    # Explicit propagation: errexit is not reliable inside $(...) or when a
+    # function's status is tested. Keep ownership until assembly has succeeded.
+    bash "$SCRIPT_DIR/build-migrations.sh" "$BUILD_TYPE" "$dir" >&2 || exit $?
     printf '%s' "$dir"
-}
+    trap - EXIT
+)
 
 # run_db_cmd runs migrate against the scratch chain and cleans up after itself —
 # on success, failure and SIGINT/SIGTERM. Only this invocation's scratch
@@ -167,7 +190,7 @@ scratch_migrations_dir() {
 run_db_cmd() {
     (
         set -euo pipefail
-        scratch="$(scratch_migrations_dir)"
+        scratch="$(scratch_migrations_dir)" || exit $?
         status=0
 
         # NOTE: plain assignments, deliberately not `local` — this body is a
@@ -192,7 +215,8 @@ run_db_cmd() {
 # is still alive. The "no migration" state is a documented, stable signal from
 # the pinned CLI: exit 1 with the literal "error: no migration".
 migrate_version_raw() {
-    scratch="$(scratch_migrations_dir)"
+    local scratch
+    scratch="$(scratch_migrations_dir)" || return
 
     set +e
     MIG_VERSION_OUT="$(
@@ -228,7 +252,7 @@ cmd_down() {
 }
 
 cmd_status() {
-    migrate_version_raw
+    migrate_version_raw || return
     if [ "$MIG_VERSION_RC" -eq 0 ]; then
         printf '%s\n' "$MIG_VERSION_OUT"
         return 0
@@ -280,14 +304,14 @@ reset_confirm() {
 }
 
 cmd_reset() {
-    reset_confirm
+    reset_confirm || return
 
     # If the instance was never initialized, skip the destructive `down -all`
     # (it would be a no-op anyway) and go straight to up. If the instance IS
     # versioned, down -all first; a failure there stops before any up runs.
-    migrate_version_raw
+    migrate_version_raw || return
     if [ "$MIG_VERSION_RC" -eq 0 ]; then
-        run_db_cmd down -all
+        run_db_cmd down -all || return
     elif ! is_no_migration; then
         printf '%s\n' "$MIG_VERSION_OUT" >&2
         echo "error: cannot determine the current migration version; refusing reset" >&2
@@ -298,6 +322,7 @@ cmd_reset() {
 }
 
 cmd_create() {
+    migration_require_gnu_tools || return
     local variant="${COMMAND_ARGS[0]:-common}"
     local name="${COMMAND_ARGS[1]:-}"
     case "$variant" in
@@ -321,6 +346,7 @@ cmd_create() {
     # otherwise a variant ending at 013 would create 014, colliding with common.
     # A repository-local lock serializes wrapper invocations across variants.
     (
+        cd "$REPO_ROOT"
         lock="migrations/.create-lock"
         if ! mkdir "$lock"; then
             echo "error: another migration create is active; if it was killed, inspect and remove the empty $lock directory" >&2
@@ -340,7 +366,7 @@ cmd_create() {
         highest="${highest:-0}"
         seed="$scratch/${highest}_sequence.up.sql"
         touch "$seed"
-        "$MIGRATE_BIN" create -ext sql -dir "$scratch" -seq "$name"
+        "$MIGRATE_BIN" create -ext sql -dir "$scratch" -seq -digits 3 "$name"
         rm -- "$seed"
         shopt -s nullglob
         up_files=("$scratch/"*"_$name.up.sql")
@@ -361,9 +387,25 @@ cmd_create() {
 
 cmd_install_migrate() {
     (
+        if [ "$(uname -sm)" != 'Linux x86_64' ]; then
+            echo 'error: the release installer supports Linux x86_64 only.' >&2
+            echo 'On other platforms, build the pinned CLI with:' >&2
+            echo '  go install -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@v4.19.1' >&2
+            exit 2
+        fi
+        migration_require_gnu_tools || exit $?
+        # Archive pins are deliberately duplicated: a version bump must update
+        # this version/checksum, .github/workflows/ci.yml and test-migrations.sh.
         version="v4.19.1"
-        install_dir="${TMPDIR:-/tmp}"
-        scratch="$(mktemp -d "$install_dir/whento-migrate-install.XXXXXX")"
+        install_dir="${MIGRATE_INSTALL_DIR:-${HOME:?HOME must be set unless MIGRATE_INSTALL_DIR is supplied}/.local/bin}"
+        mkdir -p -- "$install_dir"
+        destination="$install_dir/migrate"
+        if [ -e "$destination" ] || [ -L "$destination" ]; then
+            echo "error: refusing to replace existing '$destination'" >&2
+            exit 1
+        fi
+        # Private staging on the destination filesystem makes publication atomic.
+        scratch="$(mktemp -d "$install_dir/.whento-migrate-install.XXXXXX")"
         trap 'rm -rf -- "$scratch"' EXIT
         trap 'exit 130' INT
         trap 'exit 143' TERM
@@ -371,12 +413,12 @@ cmd_install_migrate() {
         echo "Downloading golang-migrate $version (release binary, same as CI)..."
         curl -sSLf -o "$tarball" \
             "https://github.com/golang-migrate/migrate/releases/download/${version}/migrate.linux-amd64.tar.gz"
-        echo "Verifying SHA256 (pinned in .github/workflows/ci.yml)..."
+        echo "Verifying SHA256 (kept in sync with CI and installer regression tests)..."
         echo "2ac648fbd1b127b69ab5a7b33cf96212178f71e22379fc50573630c6f4c7ce18  $tarball" | sha256sum -c -
         tar xzf "$tarball" -C "$scratch" migrate
-        # Refuse to replace an existing binary or symlink in a shared temp dir.
-        ln -T -- "$scratch/migrate" "$install_dir/migrate-$version"
-        echo "Installed to $install_dir/migrate-$version. Add it to PATH or set MIGRATE_BIN."
+        # Exclusive publication also refuses a file/symlink created during download.
+        ln -T -- "$scratch/migrate" "$destination"
+        echo "Installed to $destination. Add $install_dir to PATH or set MIGRATE_BIN=$destination."
     )
 }
 

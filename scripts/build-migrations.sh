@@ -5,6 +5,9 @@
 
 set -eu
 
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)
+
 # Assemble the migration chain (common + one variant) into an output directory.
 #
 # Safety contract:
@@ -62,22 +65,22 @@ prepare_output_dir "$OUTPUT_DIR"
 echo "Building $BUILD_TYPE migrations into '$OUTPUT_DIR'..." >&2
 
 # Copy common migrations (always included)
-if [ ! -d "./migrations/common" ]; then
-    echo "Error: ./migrations/common does not exist" >&2
+if [ ! -d "$REPO_ROOT/migrations/common" ]; then
+    echo "Error: $REPO_ROOT/migrations/common does not exist" >&2
     exit 1
 fi
-cp migrations/common/*.sql "$OUTPUT_DIR/"
+cp "$REPO_ROOT"/migrations/common/*.sql "$OUTPUT_DIR/"
 
 # Copy build-specific migrations
 case "$BUILD_TYPE" in
     cloud)
-        if [ -d "./migrations/cloud" ]; then
-            cp migrations/cloud/*.sql "$OUTPUT_DIR/"
+        if [ -d "$REPO_ROOT/migrations/cloud" ]; then
+            cp "$REPO_ROOT"/migrations/cloud/*.sql "$OUTPUT_DIR/"
         fi
         ;;
     selfhosted)
-        if [ -d "./migrations/selfhosted" ]; then
-            cp migrations/selfhosted/*.sql "$OUTPUT_DIR/"
+        if [ -d "$REPO_ROOT/migrations/selfhosted" ]; then
+            cp "$REPO_ROOT"/migrations/selfhosted/*.sql "$OUTPUT_DIR/"
         fi
         ;;
 esac

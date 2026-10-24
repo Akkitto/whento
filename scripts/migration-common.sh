@@ -11,6 +11,22 @@
 # load the trusted local .env exactly once, redact credentials for logs, and expose
 # small read-only SQL probes for confirmation prompts.
 
+# Associative arrays are required for atomic dotenv loading. Bash 3.2 must fail
+# before parsing configuration, rather than silently selecting a default database.
+if [ -z "${BASH_VERSION:-}" ] || [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
+    echo 'error: migration wrappers require Bash 4 or newer (use Linux/devcontainer or install a newer Bash).' >&2
+    return 2
+fi
+
+# Creation/publication uses GNU find -printf and ln -T for exclusive file paths.
+migration_require_gnu_tools() {
+    if ! find . --version 2>/dev/null | grep -q 'GNU findutils' ||
+       ! ln --version 2>/dev/null | grep -q 'GNU coreutils'; then
+        echo 'error: migration creation/install requires GNU find and ln (use Linux/devcontainer).' >&2
+        return 2
+    fi
+}
+
 # Parse dotenv values as data, never shell code. Single quotes are literal;
 # double quotes support \n, \r, \t, \", \\ and \$. Unquoted values support a
 # whitespace-prefixed inline comment. Variable expansion is intentionally absent.

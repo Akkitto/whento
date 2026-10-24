@@ -69,16 +69,18 @@ orig_args="$*"   # keep before the shift loop below empties $@
 if [ "${1:-}" = create ]; then
     shift
     dir=""
+    digits=6
     while [ $# -gt 1 ]; do
         case "$1" in
             -dir) dir="$2"; shift 2 ;;
             -ext) shift 2 ;;
             -seq) shift ;;
+            -digits) digits="$2"; shift 2 ;;
             *) exit 9 ;;
         esac
     done
     highest=$(find "$dir" -name '*.sql' -printf '%f\n' | sed -nE 's/^([0-9]+)_.*/\1/p' | sort -n | tail -1)
-    printf -v next '%06d' "$((10#$highest + 1))"
+    printf -v next "%0${digits}d" "$((10#$highest + 1))"
     touch "$dir/${next}_$1.up.sql" "$dir/${next}_$1.down.sql"
     exit 0
 fi
@@ -207,6 +209,90 @@ wrap PASS_PSQL_AS_DB=db bash "$MIG" reset --yes --confirm-database db </dev/null
 check "authorized reset invokes down -all" test "$(grep -c 'down -all' "$FAKE_LOG")" = "1"
 check "authorized reset invokes up" test "$(grep -c ' up$' "$FAKE_LOG")" = "1"
 
+reset_equals() {
+    : > "$FAKE_LOG"
+    wrap PASS_PSQL_AS_DB=db bash "$MIG" reset --yes --confirm-database=db </dev/null || return
+    grep -q 'down -all' "$FAKE_LOG" && grep -q ' up$' "$FAKE_LOG"
+}
+check "documented equals-form reset confirms and completes" reset_equals
+reject_empty_confirmation() {
+    : > "$FAKE_LOG"
+    if wrap bash "$MIG" reset --yes --confirm-database= </dev/null; then return 1; fi
+    [ ! -s "$FAKE_LOG" ]
+}
+check "empty equals-form confirmation fails before invoking migrate" reject_empty_confirmation
+
+init_reset_equals() {
+    : > "$FAKE_LOG"
+    wrap PASS_PSQL_AS_DB=db bash scripts/init-db.sh --reset --yes --confirm-database=db </dev/null || return
+    grep -q 'down -all' "$FAKE_LOG" && grep -q ' up$' "$FAKE_LOG"
+}
+check "initializer forwards equals-form reset consent" init_reset_equals
+
+down_without_prompt() {
+    : > "$FAKE_LOG"
+    wrap bash "$MIG" down </dev/null || return
+    grep -q ' down 1$' "$FAKE_LOG"
+}
+check "explicit down remains noninteractive and defaults to one step" down_without_prompt
+
+failed_reset_down() {
+    : > "$FAKE_LOG"
+    wrap PASS_PSQL_AS_DB=db FAKE_MIGRATE_MODE=down-fail \
+        bash "$MIG" reset --yes --confirm-database=db </dev/null && return 1
+    grep -q 'down -all' "$FAKE_LOG" && ! grep -q ' up$' "$FAKE_LOG"
+}
+check "reset stops before up if the destructive down phase fails" failed_reset_down
+
+# Every DB command must propagate the builder's actual error, even though Bash
+# disables errexit inside command substitutions by default. No CLI call or scratch
+# directory may survive a rejected/failed chain build.
+failed_chain() {
+    local command="$1" status=0
+    : > "$FAKE_LOG"
+    wrap TMPDIR="$WORK/failed-chain" PASS_PSQL_AS_DB=db \
+        bash "$MIG" --build-type bogus "$command" --yes --confirm-database=db </dev/null || status=$?
+    [ "$status" = 2 ] && [ ! -s "$FAKE_LOG" ] &&
+        [ -z "$(find "$WORK/failed-chain" -mindepth 1 -print -quit)" ]
+}
+mkdir "$WORK/failed-chain"
+for operation in up down status reset; do
+    check "$operation rejects a failed chain without invoking migrate or leaking scratch" failed_chain "$operation"
+done
+
+# Resolve source files from the script's repository, not the caller's working
+# directory; .env remains deliberately relative to the caller.
+outside_root() {
+    : > "$FAKE_LOG"
+    (cd "$WORK" && wrap bash "$REPO_ROOT/scripts/migrate.sh" status) || return
+    grep -q ' version$' "$FAKE_LOG"
+}
+check "wrapper builds its real chain from outside the repo root" outside_root
+
+missing_sources() {
+    local fixture="$WORK/missing-source" status=0
+    mkdir -p "$fixture/scripts"
+    cp scripts/migrate.sh scripts/migration-common.sh scripts/build-migrations.sh "$fixture/scripts/"
+    : > "$FAKE_LOG"
+    wrap TMPDIR="$WORK/failed-chain" bash "$fixture/scripts/migrate.sh" up || status=$?
+    [ "$status" = 1 ] && [ ! -s "$FAKE_LOG" ] &&
+        [ -z "$(find "$WORK/failed-chain" -mindepth 1 -print -quit)" ]
+}
+check "missing source chain stops before migrate and removes scratch" missing_sources
+
+copy_failure() {
+    local fixture="$WORK/copy-failure" status=0
+    mkdir "$fixture"
+    printf '#!/bin/sh\nexit 37\n' > "$fixture/cp"
+    chmod +x "$fixture/cp"
+    : > "$FAKE_LOG"
+    wrap PATH="$fixture:$WORK/bin:/usr/bin:/bin" TMPDIR="$WORK/failed-chain" \
+        bash "$MIG" up || status=$?
+    [ "$status" = 37 ] && [ ! -s "$FAKE_LOG" ] &&
+        [ -z "$(find "$WORK/failed-chain" -mindepth 1 -print -quit)" ]
+}
+check "chain copy failures preserve their status without CLI calls or scratch leaks" copy_failure
+
 # 6. invalid build type must not wipe a caller-supplied broad output
 mkdir -p "$WORK/precious"
 echo kept > "$WORK/precious/data"
@@ -243,12 +329,22 @@ count="$(printf '%s\n' "$paths" | wc -l)"
 check "two concurrent invocations use distinct scratch dirs" test "$count" = "2"
 
 # 10. Creation tests operate on a disposable source copy, never the worktree.
-# Use the real CLI when MIGRATE_BIN is supplied (as in PostgreSQL acceptance).
+# Use the real CLI when supplied or whenever PostgreSQL acceptance is requested.
 creation_repo="$WORK/creation-repo"
 mkdir -p "$creation_repo/scripts"
 cp scripts/migrate.sh scripts/migration-common.sh "$creation_repo/scripts/"
 cp -R migrations "$creation_repo/"
 creator="${MIGRATE_BIN:-$WORK/bin/migrate}"
+if [ -n "${DISPOSABLE_DB_URL:-}" ]; then
+    creator="${MIGRATE_BIN:-migrate}"
+fi
+# wrap installs fake tools on PATH; bind the creation check to the selected real
+# executable first, including CI where only DISPOSABLE_DB_URL is configured.
+creator="$(command -v "$creator")" || { echo 'CLI creation acceptance requires migrate' >&2; exit 1; }
+case "$creator" in
+    /*) ;;
+    *) creator="$PWD/$creator" ;;
+esac
 create_in_fixture() {
     (cd "$creation_repo" && wrap MIGRATE_BIN="$creator" bash scripts/migrate.sh create "$@")
 }
@@ -257,7 +353,7 @@ highest_before="$(find migrations/common migrations/cloud migrations/selfhosted 
 next=$((10#$highest_before + 1))
 for variant in selfhosted common cloud; do
     check "create $variant succeeds" create_in_fixture "$variant" smoke_test
-    printf -v prefix '%06d' "$next"
+    printf -v prefix '%03d' "$next"
     check "create $variant uses the global next version and publishes both files" \
         test -f "$creation_repo/migrations/$variant/${prefix}_smoke_test.up.sql" \
         -a -f "$creation_repo/migrations/$variant/${prefix}_smoke_test.down.sql"
@@ -271,12 +367,26 @@ rmdir "$creation_repo/migrations/.create-lock"
 check "create preserves existing source migrations" diff -r migrations/common/ "$creation_repo/migrations/common/" \
     --exclude='*_smoke_test.up.sql' --exclude='*_smoke_test.down.sql'
 
+outside_create() {
+    local prefix
+    printf -v prefix '%03d' "$next"
+    (cd "$WORK" && wrap MIGRATE_BIN=./bin/migrate \
+        bash "$creation_repo/scripts/migrate.sh" create common outside_root) || return
+    [ -f "$creation_repo/migrations/common/${prefix}_outside_root.up.sql" ] &&
+        [ -f "$creation_repo/migrations/common/${prefix}_outside_root.down.sql" ]
+}
+check "creation from outside the repo preserves a caller-relative CLI path" outside_create
+
 # Installation must work with no migrate executable, without parsing database
-# configuration, and without overwriting a preexisting file in shared TMPDIR.
+# configuration, and without overwriting a preexisting installation.
 # Only transport/checksum/archive operations are doubled in this unit section.
 install_tools="$WORK/install-tools"
 install_dir="$WORK/install-destination"
 mkdir -p "$install_tools" "$install_dir"
+cat > "$install_tools/uname" <<'EOF'
+#!/bin/bash
+printf '%s\n' "${INSTALL_PLATFORM:-Linux x86_64}"
+EOF
 cat > "$install_tools/curl" <<'EOF'
 #!/bin/bash
 printf '' > "$3"
@@ -284,6 +394,7 @@ EOF
 cat > "$install_tools/sha256sum" <<'EOF'
 #!/bin/bash
 cat > "$INSTALL_LOG"
+[ "${INSTALL_BAD_CHECKSUM:-0}" != 1 ]
 EOF
 cat > "$install_tools/tar" <<'EOF'
 #!/bin/bash
@@ -292,24 +403,108 @@ chmod +x "$4/migrate"
 EOF
 chmod +x "$install_tools/"*
 install_fixture() {
-    env -i PATH="$install_tools:/usr/bin:/bin" TMPDIR="$install_dir" \
+    env -i PATH="$install_tools:/usr/bin:/bin" HOME="$WORK/install-home" \
+        MIGRATE_INSTALL_DIR="$install_dir" INSTALL_PLATFORM="${INSTALL_PLATFORM:-Linux x86_64}" \
         MIGRATE_BIN=/not-installed/migrate DATABASE_URL=not-a-database \
         INSTALL_LOG="$WORK/install-checksum.log" bash "$MIG" install-migrate
 }
 check "install works without migrate or valid database configuration" install_fixture
-check "installed binary is executable" test -x "$install_dir/migrate-v4.19.1"
+check "installed binary is executable" test -x "$install_dir/migrate"
+# Version/checksum bumps must update this assertion, migrate.sh and ci.yml together.
 check "installer requests the pinned archive checksum" grep -q \
     '^2ac648fbd1b127b69ab5a7b33cf96212178f71e22379fc50573630c6f4c7ce18 ' "$WORK/install-checksum.log"
+check "CI uses the same pinned release version" grep -Eq \
+    '^[[:space:]]+MIGRATE_VERSION: v4\.19\.1$' .github/workflows/ci.yml
+check "CI uses the same pinned archive checksum" grep -Eq \
+    '^[[:space:]]+MIGRATE_SHA256: 2ac648fbd1b127b69ab5a7b33cf96212178f71e22379fc50573630c6f4c7ce18$' .github/workflows/ci.yml
 reject_install() { if install_fixture; then return 1; fi; }
 check "install refuses to replace an existing binary" reject_install
 check "installer cleans only its own staging directories" \
     test "$(find "$install_dir" -mindepth 1 -maxdepth 1 | wc -l)" = 1
+
+reject_platform() {
+    local platform="$1"
+    # Remove the successful fixture, not the real installation, from consideration.
+    # A fresh target makes the platform check—not the overwrite refusal—decisive.
+    env -i PATH="$install_tools:/usr/bin:/bin" HOME="$WORK/install-home" \
+        MIGRATE_INSTALL_DIR="$WORK/unsupported-install" INSTALL_PLATFORM="$platform" \
+        MIGRATE_BIN=/not-installed/migrate INSTALL_LOG="$WORK/unsupported-checksum.log" \
+        bash "$MIG" install-migrate > "$WORK/platform.log" 2>&1 && return 1
+    grep -q 'go install -tags postgres' "$WORK/platform.log" &&
+        [ ! -e "$WORK/unsupported-install" ] && [ ! -e "$WORK/unsupported-checksum.log" ]
+}
+check "installer rejects Linux arm64 before downloading or creating directories" reject_platform 'Linux aarch64'
+check "installer rejects macOS before downloading or creating directories" reject_platform 'Darwin arm64'
+
+default_install() {
+    env -i PATH="$install_tools:/usr/bin:/bin" HOME="$WORK/install-home" TMPDIR="$WORK/never-install-here" \
+        INSTALL_LOG="$WORK/default-checksum.log" bash "$MIG" install-migrate || return
+    [ -x "$WORK/install-home/.local/bin/migrate" ] && [ ! -e "$WORK/never-install-here" ]
+}
+check "default installation uses the user bin directory, not TMPDIR" default_install
+
+symlink_install() {
+    local fixture="$WORK/symlink-install"
+    mkdir "$fixture"
+    ln -s "$WORK/nonexistent-binary" "$fixture/migrate"
+    env -i PATH="$install_tools:/usr/bin:/bin" MIGRATE_INSTALL_DIR="$fixture" \
+        INSTALL_LOG="$WORK/symlink-checksum.log" bash "$MIG" install-migrate && return 1
+    [ -L "$fixture/migrate" ] && [ ! -e "$WORK/nonexistent-binary" ] &&
+        [ ! -e "$WORK/symlink-checksum.log" ]
+}
+check "installer refuses a dangling destination symlink before downloading" symlink_install
+
+reject_checksum() {
+    local fixture="$WORK/bad-checksum-install"
+    env -i PATH="$install_tools:/usr/bin:/bin" MIGRATE_INSTALL_DIR="$fixture" \
+        INSTALL_BAD_CHECKSUM=1 INSTALL_LOG="$WORK/bad-checksum.log" \
+        bash "$MIG" install-migrate && return 1
+    [ ! -e "$fixture/migrate" ] && [ -z "$(find "$fixture" -mindepth 1 -print -quit)" ]
+}
+check "checksum failure never publishes a binary and removes private staging" reject_checksum
+
+reject_non_gnu_create() {
+    local fixture="$WORK/non-gnu-tools"
+    mkdir "$fixture"
+    printf '#!/bin/sh\nexit 1\n' > "$fixture/find"
+    chmod +x "$fixture/find"
+    : > "$FAKE_LOG"
+    env -i PATH="$fixture:$WORK/bin:/usr/bin:/bin" FAKE_LOG="$FAKE_LOG" \
+        bash "$MIG" create common rejected > "$WORK/non-gnu.log" 2>&1 && return 1
+    grep -q 'GNU find and ln' "$WORK/non-gnu.log" && [ ! -s "$FAKE_LOG" ] &&
+        [ ! -d migrations/.create-lock ]
+}
+check "creation rejects unsupported tools before writing or invoking migrate" reject_non_gnu_create
 
 # 11. unset DEVCONTAINER and explicit DATABASE_URL vs contradictory DB_*: the
 # wrapper must use the explicit URL, never build from DB_*.
 : > "$FAKE_LOG"
 wrap DB_HOST=contradictory DB_NAME=wrong bash "$MIG" up >/dev/null 2>&1
 check "explicit DATABASE_URL wins over DB_*" grep -q "$FAKE_URL" "$FAKE_LOG"
+
+# Make has a different dotenv parser. Record the documented distinction without
+# reinterpreting exported environment values or changing unrelated Make targets.
+make_dotenv_contract() {
+    local fixture="$WORK/make-dotenv"
+    mkdir -p "$fixture/scripts"
+    cp Makefile "$fixture/"
+    cp scripts/migrate.sh scripts/migration-common.sh scripts/build-migrations.sh "$fixture/scripts/"
+    cp -R migrations "$fixture/"
+    printf "DB_PASSWORD='quoted'\n" > "$fixture/.env"
+    : > "$FAKE_LOG"
+    (cd "$fixture" && env -i PATH="$WORK/bin:/usr/bin:/bin" HOME="$HOME" FAKE_LOG="$FAKE_LOG" \
+        bash scripts/migrate.sh status) || return
+    grep -q 'postgres://whento:quoted@postgres:5432/whento' "$FAKE_LOG" || return
+    : > "$FAKE_LOG"
+    (cd "$fixture" && env -i PATH="$WORK/bin:/usr/bin:/bin" HOME="$HOME" FAKE_LOG="$FAKE_LOG" \
+        DB_PASSWORD=inherited make --no-print-directory migrate-status) || return
+    grep -q 'postgres://whento:%27quoted%27@postgres:5432/whento' "$FAKE_LOG" || return
+    : > "$FAKE_LOG"
+    (cd "$fixture" && env -i PATH="$WORK/bin:/usr/bin:/bin" HOME="$HOME" FAKE_LOG="$FAKE_LOG" \
+        make --no-print-directory migrate-status DB_PASSWORD=decoded) || return
+    grep -q 'postgres://whento:decoded@postgres:5432/whento' "$FAKE_LOG"
+}
+check "direct-script dotenv parsing and Make literal quotes match the documented contract" make_dotenv_contract
 
 # 12. create variant validation
 set +e
@@ -379,6 +574,15 @@ if [ -n "${DISPOSABLE_DB_URL:-}" ]; then
             psql "$uri" -v ON_ERROR_STOP=1 -qc "INSERT INTO users (id,email,password_hash,display_name) VALUES ('00000000-0000-4000-8000-000000000163','migration-sentinel@example.test','not-a-login-hash','Preserved'); INSERT INTO calendars(owner_id,name) VALUES ('00000000-0000-4000-8000-000000000163','Migration sentinel')" || return 1
         fi
         DATABASE_URL="$uri" BUILD_TYPE="$variant" bash "$MIG" up || return 1
+        # Exercise the documented Make automation against a real, fresh database
+        # owned by this harness only; never reset the caller's supplied database.
+        if [ "$mode" = fresh ]; then
+            DATABASE_URL="$uri" BUILD_TYPE="$variant" make --no-print-directory migrate-reset \
+                MIGRATE_ARGS="--yes --confirm-database=$database" </dev/null || return 1
+        fi
+        # An ordinary initialization of an already populated database is an
+        # upgrade, not a reset: the sentinel assertions below must still hold.
+        DATABASE_URL="$uri" BUILD_TYPE="$variant" bash scripts/init-db.sh </dev/null || return 1
         DATABASE_URL="$uri" BUILD_TYPE="$variant" bash "$MIG" status >"$WORK/${variant}-${mode}-status.log" 2>&1 || return 1
         [ "$(psql "$uri" -Atqc "SELECT to_regclass('public.reminder_jobs') IS NOT NULL AND NOT dirty FROM schema_migrations")" = t ] || return 1
         if [ "$mode" = upgrade ]; then

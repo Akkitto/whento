@@ -19,7 +19,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck disable=SC1091
-. "$SCRIPT_DIR/migration-common.sh"
+. "$SCRIPT_DIR/migration-common.sh" || exit $?
 
 BUILD_TYPE="${BUILD_TYPE:-selfhosted}"
 RESET=0
@@ -28,6 +28,10 @@ EXTRA_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --build-type)
+            if [ $# -lt 2 ]; then
+                echo 'error: --build-type needs a value' >&2
+                exit 2
+            fi
             BUILD_TYPE="$2"
             shift 2
             ;;
@@ -40,8 +44,16 @@ while [ $# -gt 0 ]; do
             shift
             ;;
         --confirm-database)
+            if [ $# -lt 2 ]; then
+                echo 'error: --confirm-database needs a value' >&2
+                exit 2
+            fi
             EXTRA_ARGS+=(--confirm-database "$2")
             shift 2
+            ;;
+        --confirm-database=*)
+            EXTRA_ARGS+=("$1")
+            shift
             ;;
         -h | --help)
             echo "Usage: $0 [--build-type selfhosted|cloud] [--reset] [--yes --confirm-database <name>]"
