@@ -377,6 +377,16 @@ outside_create() {
 }
 check "creation from outside the repo preserves a caller-relative CLI path" outside_create
 
+outside_create_relative_path() {
+    local prefix
+    printf -v prefix '%03d' "$((next + 1))"
+    (cd "$WORK" && wrap PATH=./bin:/usr/bin:/bin MIGRATE_BIN=migrate \
+        bash "$creation_repo/scripts/migrate.sh" create common relative_path) || return
+    [ -f "$creation_repo/migrations/common/${prefix}_relative_path.up.sql" ] &&
+        [ -f "$creation_repo/migrations/common/${prefix}_relative_path.down.sql" ]
+}
+check "creation freezes a CLI found through a relative PATH entry before changing directories" outside_create_relative_path
+
 # Installation must work with no migrate executable, without parsing database
 # configuration, and without overwriting a preexisting installation.
 # Only transport/checksum/archive operations are doubled in this unit section.

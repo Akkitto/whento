@@ -149,16 +149,18 @@ parse_args() {
 }
 
 check_migrate_bin() {
-    if ! command -v "$MIGRATE_BIN" >/dev/null 2>&1; then
+    local resolved
+    if ! resolved="$(command -v "$MIGRATE_BIN")"; then
         echo "error: golang-migrate binary '$MIGRATE_BIN' not found." >&2
         echo "Install the pinned release (v4.19.1) with: scripts/migrate.sh install-migrate" >&2
         exit 1
     fi
     # create changes to the repository root. Keep a caller-relative executable
     # path bound to the executable that was actually checked above.
-    case "$MIGRATE_BIN" in
-        /*) ;;
-        */*) MIGRATE_BIN="$PWD/$MIGRATE_BIN" ;;
+    case "$resolved" in
+        /*) MIGRATE_BIN="$resolved" ;;
+        */*) MIGRATE_BIN="$PWD/$resolved" ;;
+        *) MIGRATE_BIN="$resolved" ;;
     esac
 }
 
