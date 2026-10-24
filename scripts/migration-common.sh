@@ -18,14 +18,30 @@ if [ -z "${BASH_VERSION:-}" ] || [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
     return 2
 fi
 
-# Creation/publication uses GNU find -printf and ln -T for exclusive file paths.
-migration_require_gnu_tools() {
-    if ! find . --version 2>/dev/null | grep -q 'GNU findutils' ||
-       ! ln --version 2>/dev/null | grep -q 'GNU coreutils'; then
-        echo 'error: migration creation/install requires GNU find and ln (use Linux/devcontainer).' >&2
-        return 2
+# Test the required GNU-compatible behavior, not version banners: compatible
+# implementations differ in branding, and grep -q pipelines can fail under
+# pipefail when the version command receives SIGPIPE after the first match.
+migration_require_gnu_tools() (
+    requirement='error: migration creation/install requires GNU-compatible find -printf and ln -T (use Linux/devcontainer).'
+    if ! find . -maxdepth 0 -printf '' >/dev/null 2>&1; then
+        echo "$requirement" >&2
+        exit 2
     fi
-}
+    probe="$(mktemp -d "${TMPDIR:-/tmp}/whento-toolcheck.XXXXXX")" || exit $?
+    trap 'rm -rf -- "$probe"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    : > "$probe/source"
+    if ! ln -T -- "$probe/source" "$probe/linked" >/dev/null 2>&1; then
+        echo "$requirement" >&2
+        exit 2
+    fi
+    mkdir "$probe/directory"
+    if ln -T -- "$probe/source" "$probe/directory" >/dev/null 2>&1; then
+        echo "$requirement" >&2
+        exit 2
+    fi
+)
 
 # Parse dotenv values as data, never shell code. Single quotes are literal;
 # double quotes support \n, \r, \t, \", \\ and \$. Unquoted values support a

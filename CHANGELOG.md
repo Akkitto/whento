@@ -136,7 +136,7 @@ line per release rather than listed individually.
   overwriting existing destinations. Failed chain assembly stops before invoking
   the CLI; source paths work independently of the caller's working directory.
   Creation uses three-digit sequence prefixes. Wrappers reject Bash < 4 before
-  loading configuration; create/install require GNU find and ln, while the chain
+  loading configuration; create/install require GNU-compatible find and ln, while the chain
   builder remains BusyBox/POSIX `sh` compatible.
 
 ### Changed

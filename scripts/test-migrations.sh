@@ -387,6 +387,25 @@ outside_create_relative_path() {
 }
 check "creation freezes a CLI found through a relative PATH entry before changing directories" outside_create_relative_path
 
+compatible_tool_brand() {
+    local fixture="$WORK/compatible-tools"
+    mkdir "$fixture"
+    cat > "$fixture/ln" <<'EOF'
+#!/bin/bash
+if [ "${1:-}" = --version ]; then
+    echo 'ln (another compatible implementation)'
+    exit 0
+fi
+exec /usr/bin/ln "$@"
+EOF
+    chmod +x "$fixture/ln"
+    (cd "$creation_repo" && wrap PATH="$fixture:$WORK/bin:/usr/bin:/bin" MIGRATE_BIN="$creator" \
+        bash scripts/migrate.sh create common compatible_tool) || return
+    compgen -G "$creation_repo/migrations/common/*_compatible_tool.up.sql" >/dev/null &&
+        compgen -G "$creation_repo/migrations/common/*_compatible_tool.down.sql" >/dev/null
+}
+check "required tool behavior is accepted independently of version branding" compatible_tool_brand
+
 # Installation must work with no migrate executable, without parsing database
 # configuration, and without overwriting a preexisting installation.
 # Only transport/checksum/archive operations are doubled in this unit section.
@@ -447,9 +466,11 @@ check "installer rejects Linux arm64 before downloading or creating directories"
 check "installer rejects macOS before downloading or creating directories" reject_platform 'Darwin arm64'
 
 default_install() {
+    mkdir -p "$WORK/never-install-here"
     env -i PATH="$install_tools:/usr/bin:/bin" HOME="$WORK/install-home" TMPDIR="$WORK/never-install-here" \
         INSTALL_LOG="$WORK/default-checksum.log" bash "$MIG" install-migrate || return
-    [ -x "$WORK/install-home/.local/bin/migrate" ] && [ ! -e "$WORK/never-install-here" ]
+    [ -x "$WORK/install-home/.local/bin/migrate" ] &&
+        [ -z "$(find "$WORK/never-install-here" -mindepth 1 -print -quit)" ]
 }
 check "default installation uses the user bin directory, not TMPDIR" default_install
 
@@ -481,7 +502,7 @@ reject_non_gnu_create() {
     : > "$FAKE_LOG"
     env -i PATH="$fixture:$WORK/bin:/usr/bin:/bin" FAKE_LOG="$FAKE_LOG" \
         bash "$MIG" create common rejected > "$WORK/non-gnu.log" 2>&1 && return 1
-    grep -q 'GNU find and ln' "$WORK/non-gnu.log" && [ ! -s "$FAKE_LOG" ] &&
+    grep -q 'GNU-compatible find' "$WORK/non-gnu.log" && [ ! -s "$FAKE_LOG" ] &&
         [ ! -d migrations/.create-lock ]
 }
 check "creation rejects unsupported tools before writing or invoking migrate" reject_non_gnu_create

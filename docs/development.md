@@ -94,7 +94,8 @@ See the [dotenv rules and
 limitations](../migrations/README.md#local-environment-syntax).
 
 Migration wrappers require Bash >= 4; creation and binary installation additionally
-require GNU find and ln. Use Linux/the devcontainer, or install compatible tools;
+require GNU-compatible find (`-printf`) and ln (`-T`). Use Linux/the devcontainer,
+or install compatible tools;
 macOS's bundled Bash 3.2 is refused before any database configuration is read.
 The chain builder itself still works under POSIX/BusyBox `sh`.
 

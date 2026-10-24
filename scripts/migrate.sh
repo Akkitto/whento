@@ -71,7 +71,8 @@ The wrapper assembles the migration chain into its own mktemp scratch directory
 and removes only that directory afterwards; it never deletes a shared build path.
 golang-migrate is the pinned v4.19.1 release used by CI — not the
 golang.org/x/tools/cmd/migrate alias. See `install-migrate`.
-The wrappers require Bash >= 4; create/install also require GNU find and ln.
+The wrappers require Bash >= 4; create/install also require GNU-compatible
+find -printf and ln -T.
 The installer supports Linux x86_64 and writes to MIGRATE_INSTALL_DIR
 (default: $HOME/.local/bin), refusing to replace an existing migrate binary.
 EOF

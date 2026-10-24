@@ -5,7 +5,8 @@ WhenTo uses a conditional migration system to support both Cloud (SaaS) and Self
 ## Structure
 
 The migration wrappers require **Bash 4 or newer**. Creation and release-binary
-installation also require **GNU find and ln** (Linux/devcontainer). Unsupported
+installation also require **GNU-compatible find (`-printf`) and ln (`-T`)**
+(Linux/devcontainer). Required behavior is probed rather than version branding. Unsupported
 shells fail before reading database configuration; creation/installation check
 their tools before writing. The standalone chain builder remains POSIX `sh`
 compatible, including BusyBox.
